@@ -1,26 +1,36 @@
+# Versions pinned to exactly what's been tested and verified working (see
+# README.md "Known gotchas" for the real bugs found along the way — several
+# of them are specific to versions/hardware, not just logic). If you need a
+# newer version of something, upgrade deliberately and re-run the full test
+# suite plus a live smoke test (`streamlit run app.py`) before trusting it,
+# not as a routine `pip install -U`.
+
 # Core numerics / data
-numpy
-pandas
-scipy
-scikit-learn
+numpy==2.4.6
+pandas==3.0.6
+scipy==1.17.1
+scikit-learn==1.9.1
 
 # Video analysis
-opencv-python
-mediapipe
+opencv-python==5.0.0.93
+mediapipe==1.0.1
 
 # Speech (streaming transcription + voice activity)
-faster-whisper
-silero-vad
-soundcard
+faster-whisper==1.2.1
+silero-vad==6.2.3
+soundcard==0.4.6
 
 # GPU runtime for faster-whisper on Windows (no CUDA toolkit install needed;
-# analyzer/transcribe.py puts these DLL folders on PATH automatically)
-nvidia-cublas-cu12
-nvidia-cudnn-cu12
+# analyzer/transcribe.py puts these DLL folders on PATH automatically).
+# compute_type="int8_float16" hung (not errored) on the dev GPU (GTX 1650)
+# with these versions -- config.py defaults to "int8" instead. See
+# README.md "Known gotchas" before changing either.
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.26.0.51
 
 # Dashboard
-streamlit
-plotly
+streamlit==1.64.0
+plotly==7.1.0
 
 # Testing
-pytest
+pytest==9.1.1

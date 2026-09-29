@@ -21,6 +21,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from analyzer.config import PATHS
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS metrics (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,7 +73,7 @@ class EventLog:
     def __init__(self, session_dir: str | Path):
         self.session_dir = Path(session_dir)
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.session_dir / "events.db"
+        self.db_path = self.session_dir / PATHS.db_filename
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:

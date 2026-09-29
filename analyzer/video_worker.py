@@ -63,6 +63,26 @@ class VideoWorker:
         self._last_metric_t: float | None = None
         self._face_absent_since: float | None = None
 
+    def calibration_seconds_remaining(self, t: float) -> float:
+        """0.0 once calibrated. Before that: the full calibration window if
+        no frame has been processed yet, otherwise how many seconds of it
+        remain at time `t`.
+        Exists so a UI can show "look at the camera now, N seconds left" --
+        without this, calibration happens silently and whoever is on
+        camera has no way to know those specific seconds are the ones
+        being averaged into their "normal" baseline. A bad calibration
+        (looking at a screen/dashboard instead of the lens during this
+        window) then makes completely normal posture read as "looking
+        away" for the rest of the session -- this was found to be exactly
+        that, not a scoring bug, by testing with a real person who wasn't
+        told when calibration was happening.
+        """
+        if self.calibrated:
+            return 0.0
+        if self._session_start_t is None:
+            return self.calibration_seconds  # no frame processed yet -> the full window is still ahead
+        return max(0.0, self.calibration_seconds - (t - self._session_start_t))
+
     def process_frame(self, frame_bgr, t: float) -> None:
         if self._session_start_t is None:
             self._session_start_t = t

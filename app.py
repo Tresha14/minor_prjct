@@ -56,7 +56,8 @@ def start_session() -> None:
     transcriber = get_transcriber()
     tracker = FaceTracker()
     session_dir = Path(PATHS.data_dir) / time.strftime("%Y%m%d_%H%M%S")
-    session = SessionCapture(session_dir, transcriber, tracker)
+    session = SessionCapture(session_dir, transcriber, tracker,
+                              solo_test_mode=st.session_state.get("solo_test_mode", False))
     session.start()
 
     st.session_state.session = session
@@ -107,6 +108,17 @@ if session is None:
         "Press **Start session** to begin capturing from the webcam and system audio. "
         "The first start will take a few seconds while the speech model loads."
     )
+    st.checkbox(
+        "🧪 Solo test mode — transcribe my own microphone as if I were the candidate",
+        key="solo_test_mode",
+        help=(
+            "In a real interview, the candidate's voice comes over the call (captured "
+            "via speaker loopback) and is kept separate from the interviewer's "
+            "microphone. For testing alone without a real call, this points the "
+            "transcribed channel at your own microphone instead, so you can talk and "
+            "see it transcribed. Turn this off for an actual interview session."
+        ),
+    )
 else:
     @st.fragment(run_every=1.5)
     def live_view():
@@ -121,8 +133,25 @@ else:
         # update on a full page rerun (i.e. only when a button is clicked),
         # which looked frozen during live testing.
         elapsed = time.time() - session._t0 if session._t0 else 0.0
+        mode_note = " · 🧪 solo test mode (own mic transcribed as candidate)" if session.solo_test_mode else ""
         st.caption(f"Session running — {format_seconds(elapsed)} elapsed · "
-                   f"saving to `{st.session_state.session_dir}`")
+                   f"saving to `{st.session_state.session_dir}`{mode_note}")
+
+        # Calibration happens silently otherwise -- found by testing with a
+        # real person who wasn't told when it was happening: whatever
+        # position they were in during this window becomes "normal" for
+        # the rest of the session, so if they were looking at this page
+        # instead of the camera, completely ordinary posture afterward
+        # reads as "looking away". This banner is the fix -- it tells
+        # whoever is on camera exactly when to look at the lens.
+        remaining = session.video_worker.calibration_seconds_remaining(elapsed)
+        if remaining > 0:
+            st.warning(
+                f"🎯 **Calibrating — look directly at the camera now.** "
+                f"{remaining:.0f}s remaining. Whatever position the camera sees during "
+                f"this window becomes the \"normal\" baseline for the rest of the session."
+            )
+            st.progress(1 - (remaining / session.video_worker.calibration_seconds))
 
         camera_facing = log.recent_metrics("camera_facing")
         pose_stability = log.recent_metrics("pose_stability")

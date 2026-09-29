@@ -240,8 +240,20 @@ class SessionCapture:
     """
 
     def __init__(self, session_dir, transcriber, face_tracker,
-                 camera_index: int = 0, candidate_device=None, interviewer_device=None):
+                 camera_index: int = 0, candidate_device=None, interviewer_device=None,
+                 solo_test_mode: bool = False):
+        """`solo_test_mode=True` points the candidate (transcribed) channel
+        at your own microphone instead of speaker loopback, and skips the
+        separate interviewer channel entirely (both would otherwise fight
+        over the same physical microphone). This exists purely for testing
+        and demos by one person: talk into your own mic and see it
+        transcribed as if you were the candidate. It is NOT the real
+        two-channel design (see this module's docstring) -- for an actual
+        interview, leave this False so the candidate's voice comes from the
+        call (via loopback) and never gets mixed with the interviewer's.
+        """
         self.log = EventLog(session_dir)
+        self.solo_test_mode = solo_test_mode
         self.video_worker = VideoWorker(self.log, face_tracker, source="video")
         self.candidate_worker = AudioWorker(self.log, transcriber, VoiceActivityDetector(),
                                              source="audio_candidate")
@@ -253,8 +265,12 @@ class SessionCapture:
         # badly enough to drop words near the end of a clip (see README.md
         # "Known gotchas"). Throttling video to VIDEO.target_fps fixed it.
         self.video_source = VideoSource(camera_index=camera_index, target_fps=VIDEO.target_fps)
-        self.candidate_source = AudioSource(candidate_device or default_loopback_device())
-        self.interviewer_source = AudioSource(interviewer_device or default_microphone_device())
+        if solo_test_mode:
+            self.candidate_source = AudioSource(candidate_device or default_microphone_device())
+            self.interviewer_source = None
+        else:
+            self.candidate_source = AudioSource(candidate_device or default_loopback_device())
+            self.interviewer_source = AudioSource(interviewer_device or default_microphone_device())
 
         # Candidate audio goes through a queue (see QueuedConsumer) because
         # its handler does GPU transcription, which is slow enough to cause
@@ -272,13 +288,16 @@ class SessionCapture:
         self._candidate_queue.start()
         self.video_source.start(self.video_worker.process_frame, self._t0)
         self.candidate_source.start(self._candidate_queue.put, self._t0)
-        self.interviewer_source.start(self.interviewer_monitor.push_audio, self._t0)
-        logger.info("SessionCapture started, writing to %s", self.log.db_path)
+        if self.interviewer_source is not None:
+            self.interviewer_source.start(self.interviewer_monitor.push_audio, self._t0)
+        logger.info("SessionCapture started (solo_test_mode=%s), writing to %s",
+                    self.solo_test_mode, self.log.db_path)
 
     def stop(self) -> None:
         self.video_source.stop()
         self.candidate_source.stop()
-        self.interviewer_source.stop()
+        if self.interviewer_source is not None:
+            self.interviewer_source.stop()
         self._candidate_queue.stop()  # drains whatever was captured right up to the end
         t_end = time.time() - self._t0 if self._t0 else 0.0
         self.video_worker.finish(t_end)

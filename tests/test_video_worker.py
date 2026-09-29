@@ -4,6 +4,8 @@ tracker, so these run fast with no camera or MediaPipe model needed.
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from analyzer.events import EventLog
@@ -51,6 +53,24 @@ def turned_away_pose():
 def blendshapes(blinking: bool):
     score = 0.9 if blinking else 0.05
     return {"eyeBlinkLeft": score, "eyeBlinkRight": score}
+
+
+def test_calibration_seconds_remaining_counts_down_then_hits_zero(tmp_path):
+    log = make_log(tmp_path)
+    readings = [FakeReading(pose=centered_pose(), blendshapes=blendshapes(False))] * 20
+    worker = VideoWorker(log, FakeTracker(readings), calibration_seconds=2.0, metric_interval_s=1.0)
+
+    assert worker.calibration_seconds_remaining(t=0.0) == 2.0  # no frame processed yet -> full window
+
+    worker.process_frame(frame_bgr=None, t=0.0)
+    assert worker.calibration_seconds_remaining(t=0.0) == pytest.approx(2.0)
+    assert worker.calibration_seconds_remaining(t=1.0) == pytest.approx(1.0)
+    assert worker.calibration_seconds_remaining(t=1.9) == pytest.approx(0.1)
+
+    worker.process_frame(frame_bgr=None, t=2.0)  # calibration window elapses
+    assert worker.calibrated
+    assert worker.calibration_seconds_remaining(t=2.0) == 0.0
+    assert worker.calibration_seconds_remaining(t=10.0) == 0.0  # stays 0, never negative
 
 
 def test_calibration_completes_and_logs_event(tmp_path):
