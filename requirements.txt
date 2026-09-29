@@ -1,0 +1,26 @@
+# Core numerics / data
+numpy
+pandas
+scipy
+scikit-learn
+
+# Video analysis
+opencv-python
+mediapipe
+
+# Speech (streaming transcription + voice activity)
+faster-whisper
+silero-vad
+soundcard
+
+# GPU runtime for faster-whisper on Windows (no CUDA toolkit install needed;
+# analyzer/transcribe.py puts these DLL folders on PATH automatically)
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
+
+# Dashboard
+streamlit
+plotly
+
+# Testing
+pytest
