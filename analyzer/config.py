@@ -64,7 +64,89 @@ class Paths:
     db_filename: str = "events.db"
 
 
+@dataclass(frozen=True)
+class FusionConfig:
+    """Reference ranges used to turn raw metrics into 0-1 "how good is
+    this" scores before they're combined (see analyzer/fusion.py).
+
+    These numbers come from general public-speaking / conversational-speech
+    reference points (typical conversational English is roughly 120-150
+    words per minute; average resting blink rate is roughly 15-20/min) and
+    from engineering judgement -- NOT from this project's own collected
+    data. Week 7 of the plan (synopsis Sec 8) validates these against real
+    human ratings and recalibrates if the data supports it. Until then,
+    every fusion score is a transparent first approximation, not a
+    validated measurement -- state that plainly if asked in a viva.
+    """
+    # Speaking rate (words per minute): comfortable conversational band.
+    # Penalised further away in either direction -- too slow reads as
+    # hesitant, too fast reads as rushed.
+    wpm_floor: float = 60.0
+    wpm_good_low: float = 110.0
+    wpm_good_high: float = 165.0
+    wpm_ceiling: float = 220.0
+
+    # Pause rate: fraction of a segment spent in pauses >= pause_threshold_s.
+    pause_rate_good: float = 0.15   # at/below this, no penalty
+    pause_rate_bad: float = 0.45    # at/above this, fully penalised
+
+    # Filler words per 100 words.
+    filler_rate_good: float = 1.0
+    filler_rate_bad: float = 8.0
+
+    # Hedge phrases per 100 words. Not produced by any module yet
+    # (analyzer/text.py is Week 6) -- these thresholds exist now so
+    # fusion.py's shape doesn't need to change once it is.
+    hedge_rate_good: float = 1.0
+    hedge_rate_bad: float = 10.0
+
+    # Head-pose stability: mean std-dev of yaw/pitch/roll (degrees) over
+    # the rolling window (analyzer/video_features.py's pose_stability) --
+    # lower means steadier.
+    pose_stability_good: float = 2.0
+    pose_stability_bad: float = 12.0
+
+    # Blink rate: normal resting range is roughly 15-20/min; well outside
+    # it in either direction is a weaker, secondary signal (see synopsis
+    # Sec 5.2 -- blink rate is deliberately treated as low-weight below).
+    blink_floor: float = 2.0
+    blink_good_low: float = 10.0
+    blink_good_high: float = 25.0
+    blink_ceiling: float = 40.0
+
+    # Sub-score weights: relative, not required to sum to 1 -- fusion.py's
+    # weighted_average() renormalises over whichever inputs are actually
+    # available, so a metric that isn't wired up yet (e.g. hedge_rate) is
+    # simply dropped rather than guessed at.
+    engagement_weights: dict = None
+    fluency_weights: dict = None
+    confidence_weights: dict = None
+
+    def __post_init__(self):
+        # frozen dataclass + mutable dict defaults -> set them here instead
+        # of in the field defaults (a bare `dict` default would be shared
+        # across instances).
+        object.__setattr__(self, "engagement_weights", {
+            "camera_facing": 0.45,
+            "pause_rate": 0.20,
+            "wpm": 0.20,
+            "pose_stability": 0.15,
+        })
+        object.__setattr__(self, "fluency_weights", {
+            "filler_rate": 0.40,
+            "pause_rate": 0.40,
+            "wpm": 0.20,
+        })
+        object.__setattr__(self, "confidence_weights", {
+            "pause_rate": 0.30,
+            "camera_facing": 0.30,
+            "blink_rate": 0.15,
+            "hedge_rate": 0.25,
+        })
+
+
 AUDIO = AudioConfig()
 VIDEO = VideoConfig()
 TEXT = TextConfig()
 PATHS = Paths()
+FUSION = FusionConfig()

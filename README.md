@@ -88,7 +88,7 @@ minor_project/
     capture.py                  DONE  live capture: webcam/loopback/mic wired into the workers
     dashboard_data.py             DONE  pure formatting/aggregation helpers for app.py
     text.py                         TODO  hedging, sentiment, answer relevance
-    fusion.py                     TODO  combines everything into engagement/fluency/confidence
+    fusion.py                     DONE  rule-based engagement/fluency/confidence scoring
     feedback.py                     TODO  turns scores into coaching tips
   app.py                            DONE  Streamlit live dashboard (interviewer-only)
   run_session.py                   TODO  starts capture + worker processes
@@ -168,7 +168,28 @@ minor_project/
   saved to disk afterward. **Found and fixed two more real bugs doing this** — see
   "Known gotchas": a frozen elapsed-time display, and Whisper hallucinating phrases on
   near-silent audio.
-- 67/67 tests passing.
+- **Fusion / scoring layer** (`analyzer/fusion.py`) — rule-based, not a trained model
+  (the dataset is far too small to train one responsibly; see the synopsis Sec 5.5 and
+  Sec 8). Turns the metrics already in the event log into three 0–100 sub-scores —
+  engagement, fluency, confidence — using two rules enforced throughout: a metric that
+  hasn't been observed yet is **dropped from the average**, never guessed at, and if
+  every input to a sub-score is missing, that sub-score is **`None`, not a fabricated
+  default**. Every score is traceable back to exactly which metrics fed it (see
+  `SubScore.drivers`) — this is surfaced directly in the dashboard's "How these scores
+  were built" expander, not just in code. Tested unusually heavily for this project,
+  on purpose: hand-calculated "golden value" checks (not just example-based sanity
+  checks), monotonicity sweeps (e.g. more camera-facing time can never lower
+  engagement — checked by sweeping the whole 0–1 range and asserting the score never
+  decreases), and a config sanity check that fails loudly if a weight dict in
+  `config.py` ever references a metric name that doesn't exist (catches typos that
+  would otherwise silently contribute nothing to a score, forever, with no error). 24
+  tests in `tests/test_fusion.py`. **Verified live, not just unit-tested:** hand-computed
+  the expected engagement/fluency/confidence scores from the dashboard's own live
+  readings during a browser test, and the displayed scores matched the hand
+  calculation exactly (down to driver-by-driver percentages), proving the whole chain
+  — event log → `compute_from_log` → `compute_scores` → dashboard tiles — is wired
+  correctly end to end in the actual running app.
+- 91/91 tests passing.
 
 ### Not started yet
 - **Call-window video capture via OBS Virtual Camera.** `capture.py`'s `VideoSource`
@@ -177,9 +198,13 @@ minor_project/
   (see `analyzer/capture.py`'s docstring). **Blocked: OBS Studio is not installed on
   the dev machine yet.** Until it is, `capture.py`/`app.py` have been developed and
   validated against a plain webcam instead. **This is the natural next task.**
-- `analyzer/text.py` — hedging/sentiment/answer-relevance (Week 4 in the plan).
-- `analyzer/fusion.py`, `analyzer/feedback.py` — later weeks.
-- `evaluation/` scripts, real dataset collection — Week 7.
+- `analyzer/text.py` — hedging/sentiment/answer-relevance (Week 6 in the plan). Once
+  built, its `hedge_rate` metric plugs straight into `fusion.py`'s confidence score
+  with no changes needed there — the weight is already configured, just currently
+  dropped because nothing produces the metric yet.
+- `analyzer/feedback.py` — turning fusion scores into worded coaching tips (Week 6).
+- `evaluation/` scripts, real dataset collection, validating/recalibrating
+  `fusion.py`'s reference ranges against real human ratings — Week 7.
 
 ### Known gotchas (read before touching audio/GPU code)
 - **Whisper hallucinates short phrases on near-silent audio — gate transcription on
@@ -293,10 +318,10 @@ Run the tests to confirm the setup works:
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q
 ```
-You should see `67 passed`. If GPU-related tests are added later and fail, that's a
+You should see `91 passed`. If GPU-related tests are added later and fail, that's a
 hardware/driver issue on your machine specifically — CPU fallback should still work
 (`analyzer/transcribe.py` falls back automatically and logs a warning). None of the
-current 67 tests actually require a GPU, webcam or microphone — they use fake
+current 91 tests actually require a GPU, webcam or microphone — they use fake
 transcriber/VAD/tracker/AppTest objects, so they should pass identically on any machine.
 
 To actually see the live dashboard (needs a webcam and speakers/mic on your machine):
@@ -312,17 +337,17 @@ To actually see the live dashboard (needs a webcam and speakers/mic on your mach
 | 2 | Audio worker: VAD + streaming transcript + pauses/WPM/fillers | **Done** (`analyzer/audio_worker.py`, tested against real audio) |
 | 3 | Video worker: gaze, head pose, blinks, calibration | **Done** (`analyzer/video_worker.py`, tested against a real webcam) |
 | 4 | Event log + live Streamlit dashboard | **Done** (`analyzer/events.py`, `analyzer/capture.py`, `app.py` — all tested against real hardware) |
-| 5 | Fusion layer: rule-based scoring | Not started |
+| 5 | Fusion layer: rule-based scoring | **Done** (`analyzer/fusion.py`, wired live into `app.py`, verified against hand-calculated values) |
 | 6 | Feedback generator + background LLM scoring | Not started |
 | 7 | Data collection + evaluation (validation, rater agreement, ablation) | Not started |
 | 8 | Polish, demo rehearsal, final report | Not started |
 
-**We're ahead of the week-by-week schedule** — Weeks 2 through 4 are all done. The
+**We're ahead of the week-by-week schedule** — Weeks 2 through 5 are all done. The
 remaining open item from Week 1, call-window video capture, is blocked on installing
-OBS Studio, not on anything technical. The next natural task is Week 5: the rule-based
-fusion layer (`analyzer/fusion.py`), combining the metrics already being written to
-the event log into the three sub-scores (engagement, fluency, confidence) described in
-the synopsis.
+OBS Studio, not on anything technical. The next natural task is Week 6: turning the
+fusion scores into worded coaching tips (`analyzer/feedback.py`), and eventually
+`analyzer/text.py` (hedging/sentiment/answer-relevance) to feed the confidence score's
+already-configured-but-unused `hedge_rate` input.
 
 If behind schedule: drop background LLM scoring first, then the live transcript
 (keep live video + voice-activity metrics; transcribe after the session instead).
@@ -355,22 +380,26 @@ paste this to Claude:
 > Read `README.md` in full, then read `analyzer/config.py`, `analyzer/events.py`,
 > `analyzer/audio_features.py`, `analyzer/transcribe.py`, `analyzer/vad.py`,
 > `analyzer/audio_worker.py`, `analyzer/video_features.py`, `analyzer/video.py`,
-> `analyzer/video_worker.py`, `analyzer/capture.py`, `analyzer/dashboard_data.py` and
-> `app.py` to see what's already built and tested — pay particular attention to the
-> "Known gotchas" section, which explains several real bugs (dropped words from a bad
-> chunking design, dropped words again from a threading bug, Whisper hallucinating on
-> silence, a frozen UI element) that were found by testing against real hardware and
-> fixed. Then run:
+> `analyzer/video_worker.py`, `analyzer/capture.py`, `analyzer/dashboard_data.py`,
+> `analyzer/fusion.py` and `app.py` to see what's already built and tested — pay
+> particular attention to the "Known gotchas" section, which explains several real
+> bugs (dropped words from a bad chunking design, dropped words again from a
+> threading bug, Whisper hallucinating on silence, a frozen UI element) that were
+> found by testing against real hardware and fixed, and to `fusion.py`'s docstring,
+> which explains the two rules its scoring enforces (never fabricate a missing
+> metric; a sub-score with no inputs is `None`, not a fake default). Then run:
 >   `mkdir -p analyzer/models && curl -L -o analyzer/models/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`
 > (the face-tracking model isn't committed to git) and
 > `./.venv/Scripts/python.exe -m pytest tests/ -q` to confirm the setup works (expect
-> 67 passed — none of these need a camera, mic or GPU, they all use fakes). If you want
-> to see the actual dashboard, `./.venv/Scripts/streamlit.exe run app.py` needs a real
-> webcam and speakers/mic. Then help me build `analyzer/fusion.py` (Week 5): combine
-> the metrics already being written to the event log (camera_facing, pose_stability,
-> blink_rate, wpm, pause_rate, filler_rate) into the three rule-based sub-scores the
-> synopsis describes -- engagement, fluency, confidence -- each one traceable back to
-> its named inputs, not a black-box model (see the synopsis Sec 5.5 for the intended
-> formulas). Write it the way every other module here was written: pure functions
-> first, unit tested with plain numbers, no event-log or hardware dependency needed to
-> test the scoring math itself.
+> 91 passed — none of these need a camera, mic or GPU, they all use fakes). If you want
+> to see the actual dashboard, including the live fusion scores, `./.venv/Scripts/streamlit.exe run app.py`
+> needs a real webcam and speakers/mic. Then help me build `analyzer/feedback.py`
+> (Week 6): turn a `FusionResult` (see `analyzer/fusion.py`) into three to five
+> specific, worded coaching tips grounded only in the actual computed numbers and
+> timestamps (e.g. "Camera-facing time was 42% — try holding your gaze on the lens for
+> 3-5 seconds at a time"), never inventing an observation the data doesn't support. If
+> a language model is used to phrase the tips, it must only see the already-computed
+> metrics as input, never raw video/audio — the scores themselves stay rule-based, per
+> the synopsis Sec 5.7. Alongside that, `analyzer/text.py` (hedging/sentiment/answer
+> relevance) is the other open Week 6 item, and it plugs straight into `fusion.py`'s
+> confidence score with no changes needed there once it writes a `hedge_rate` metric.

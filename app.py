@@ -39,6 +39,7 @@ from analyzer.config import PATHS
 from analyzer.dashboard_data import (
     FLAGGED_EVENT_KINDS, format_seconds, latest_value, metric_delta_label, summarize_events,
 )
+from analyzer.fusion import compute_from_log, write_scores
 
 st.set_page_config(page_title="Interview Coach — Live View", layout="wide")
 
@@ -147,6 +148,35 @@ else:
         br = latest_value(blink_rate)
         metric_cols[4].metric("Blinks / min", f"{br:.0f}" if br is not None else "—",
                                delta=metric_delta_label(blink_rate))
+
+        # Fusion scores: computed fresh from the latest readings above and
+        # saved back to the log every refresh, so the post-session report
+        # can later read a full history of them like any other metric.
+        # Each is None (rendered as "—") rather than a fabricated number
+        # if nothing has fed it yet -- see analyzer/fusion.py's docstring.
+        fusion_result = compute_from_log(log)
+        write_scores(log, fusion_result, t=elapsed)
+
+        st.subheader("Fused scores")
+        st.caption("Rule-based, not a black box — expand \"How these scores were built\" below to see exactly what fed each one.")
+        score_cols = st.columns(3)
+        for col, label, sub in zip(
+            score_cols,
+            ("Engagement", "Fluency", "Confidence"),
+            (fusion_result.engagement, fusion_result.fluency, fusion_result.confidence),
+        ):
+            col.metric(label, f"{sub.value:.0f}" if sub.value is not None else "—")
+        with st.expander("How these scores were built"):
+            for label, sub in (
+                ("Engagement", fusion_result.engagement),
+                ("Fluency", fusion_result.fluency),
+                ("Confidence", fusion_result.confidence),
+            ):
+                if sub.drivers:
+                    parts = ", ".join(f"{name} {score * 100:.0f}%" for name, score in sub.drivers.items())
+                    st.text(f"{label}: {parts}")
+                else:
+                    st.text(f"{label}: not enough data yet")
 
         chart_cols = st.columns(2)
         with chart_cols[0]:
