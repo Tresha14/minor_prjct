@@ -25,6 +25,11 @@ class AudioConfig:
     max_chunk_s: float = 15.0          # force a cut here even mid-speech, so one long
                                         # monologue can't stall transcription indefinitely
     min_chunk_s: float = 2.0           # never cut a chunk shorter than this
+    min_speech_fraction: float = 0.05  # skip transcribing a chunk if less than this fraction
+                                        # of it is detected speech -- Whisper hallucinates short
+                                        # phrases ("You", "Thank you") on near-silent audio
+                                        # otherwise; found by testing against a live mic with
+                                        # only ambient room noise. See README.md "Known gotchas".
 
 
 @dataclass(frozen=True)

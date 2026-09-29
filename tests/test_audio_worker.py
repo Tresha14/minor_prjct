@@ -192,6 +192,40 @@ def test_metrics_written_for_each_confirmed_segment(tmp_path):
     assert len(wpm_rows) >= 1
 
 
+def test_near_silent_chunk_is_never_sent_to_the_transcriber(tmp_path):
+    # 20 seconds with only a faint, sub-threshold hum -- FakeVAD (threshold
+    # 0.01) detects no speech at all in it, mimicking the real bug found by
+    # testing against a live mic picking up nothing but room noise: Whisper
+    # hallucinates short phrases ("You", "Thank you") on audio like this if
+    # it's sent at all.
+    audio = np.full(20 * SR, 0.001, dtype=np.float32)
+    log = make_log(tmp_path)
+    transcriber = FakeTranscriber([])
+    worker = AudioWorker(log, transcriber, FakeVAD(), sample_rate=SR,
+                          target_chunk_s=8.0, max_chunk_s=15.0, min_chunk_s=2.0)
+
+    push_in_pieces(worker, audio, piece_seconds=1.0)
+    worker.flush()
+
+    assert transcriber.calls == [], "a near-silent chunk should never reach the transcriber"
+    assert log.recent_metrics("wpm") == []
+
+
+def test_chunk_with_real_speech_is_still_sent_even_with_some_silence(tmp_path):
+    # sanity check the gate isn't overly aggressive: a normal chunk (mostly
+    # speech, some genuine pauses) must still reach the transcriber.
+    audio = synth_audio([(0.0, 3.0), (4.0, 7.0)], total_seconds=9.0)  # ~67% speech
+    log = make_log(tmp_path)
+    transcriber = FakeTranscriber([])
+    worker = AudioWorker(log, transcriber, FakeVAD(), sample_rate=SR,
+                          target_chunk_s=8.0, max_chunk_s=15.0, min_chunk_s=2.0)
+
+    push_in_pieces(worker, audio, piece_seconds=1.0)
+    worker.flush()
+
+    assert len(transcriber.calls) >= 1
+
+
 def test_invalid_chunk_bounds_raise():
     with pytest.raises(ValueError):
         AudioWorker(event_log=None, transcriber=None, vad=None,

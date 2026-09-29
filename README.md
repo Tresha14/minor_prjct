@@ -86,10 +86,11 @@ minor_project/
     video.py                DONE  MediaPipe FaceLandmarker wrapper (Tasks API)
     video_worker.py           DONE  live pipeline: calibration + camera-facing/pose/blink metrics
     capture.py                  DONE  live capture: webcam/loopback/mic wired into the workers
-    text.py                       TODO  hedging, sentiment, answer relevance
-    fusion.py                  TODO  combines everything into engagement/fluency/confidence
-    feedback.py                  TODO  turns scores into coaching tips
-  app.py                          TODO  Streamlit live dashboard
+    dashboard_data.py             DONE  pure formatting/aggregation helpers for app.py
+    text.py                         TODO  hedging, sentiment, answer relevance
+    fusion.py                     TODO  combines everything into engagement/fluency/confidence
+    feedback.py                     TODO  turns scores into coaching tips
+  app.py                            DONE  Streamlit live dashboard (interviewer-only)
   run_session.py                   TODO  starts capture + worker processes
   tests/                    DONE  pytest suite — 14 tests passing, run before every commit
   evaluation/                TODO  validation, ablation, rater-agreement scripts (Week 7)
@@ -150,25 +151,57 @@ minor_project/
   `tests/test_capture.py` (pure logic — mono conversion, interval batching, and the
   threading/queue behavior described below — no camera or mic needed to run them).
   Found and fixed a real bug in the process — see "Known gotchas".
-- 49/49 tests passing.
+- **Live dashboard** (`app.py`, `analyzer/dashboard_data.py`) — a Streamlit page for
+  the interviewer: Start/Stop session, a "mark next question" button, live metric
+  tiles (camera-facing %, WPM, pause rate, filler rate, blink rate) that refresh every
+  1.5s via `st.fragment`, rolling charts, a timeline of flagged moments, and the live
+  transcript. `dashboard_data.py` holds the pure formatting/aggregation logic (13
+  tests, no Streamlit/camera/mic needed); `app.py` itself has 3 tests using
+  Streamlit's own `AppTest` framework, checked in its idle state only (starting a real
+  session needs real hardware, so that path is checked manually — see below).
+  **Actually run end-to-end via a live browser** (not just imported): started the
+  server, clicked Start session, played the 29-word test clip through the speaker
+  while the webcam ran, and watched it work — correct live transcript, correct WPM
+  (149) and filler count (4.8/100 words, matching the clip's one "Umm"), only one
+  genuine flagged pause, camera-facing chart updating, Stop session tore everything
+  down cleanly with zero errors in the server log, and the session data was confirmed
+  saved to disk afterward. **Found and fixed two more real bugs doing this** — see
+  "Known gotchas": a frozen elapsed-time display, and Whisper hallucinating phrases on
+  near-silent audio.
+- 67/67 tests passing.
 
 ### Not started yet
 - **Call-window video capture via OBS Virtual Camera.** `capture.py`'s `VideoSource`
   works with any camera device index, so once OBS is installed its virtual camera can
   be used as-is — nothing in the code needs to change, just point `camera_index` at it
   (see `analyzer/capture.py`'s docstring). **Blocked: OBS Studio is not installed on
-  the dev machine yet.** Until it is, `capture.py` has been developed and validated
-  against a plain webcam instead. **This is the natural next task**, alongside
-  `run_session.py` (a real entry point that starts a `SessionCapture` and runs the
-  Streamlit dashboard against it — right now `SessionCapture` is only driven by an
-  ad-hoc test script).
+  the dev machine yet.** Until it is, `capture.py`/`app.py` have been developed and
+  validated against a plain webcam instead. **This is the natural next task.**
 - `analyzer/text.py` — hedging/sentiment/answer-relevance (Week 4 in the plan).
-- `analyzer/video.py` — MediaPipe face/gaze/head-pose tracking (Week 3 in the plan).
-- `analyzer/fusion.py`, `analyzer/feedback.py`, `app.py` (Streamlit dashboard),
-  `run_session.py` — all later weeks.
+- `analyzer/fusion.py`, `analyzer/feedback.py` — later weeks.
 - `evaluation/` scripts, real dataset collection — Week 7.
 
 ### Known gotchas (read before touching audio/GPU code)
+- **Whisper hallucinates short phrases on near-silent audio — gate transcription on
+  detected speech, don't just gate the cut point.** Live-tested `app.py` against a real
+  microphone with only ambient room noise (no one speaking) and the transcript showed
+  "You you" — a well-known Whisper failure mode, not a bug in our code, but one that
+  would otherwise pollute the live transcript and skew WPM/pause metrics as if someone
+  had spoken. The VAD was already used to choose *where* to cut a chunk
+  (`audio_worker.py`'s `_find_cut_point`), but nothing stopped a chunk from being sent
+  to Whisper at all if it turned out to be almost entirely silence. Fixed with
+  `AudioWorker._has_enough_speech()`: skip the Whisper call entirely (and log nothing)
+  if less than `config.AUDIO.min_speech_fraction` (5%) of the chunk is detected speech.
+  Re-tested live afterward with real speech playing: correct transcript, no
+  hallucinated phrases, and only genuine pauses got flagged. Regression tests in
+  `tests/test_audio_worker.py` cover both "near-silent chunk never reaches the
+  transcriber" and "a normal chunk with some genuine pauses still does."
+- **A Streamlit `st.fragment` only refreshes what's written inside it.** `app.py`'s
+  elapsed-time caption was originally a plain `st.caption()` placed *above* the
+  `@st.fragment(run_every=1.5)` block — it looked frozen at "00:00 elapsed" during live
+  testing because nothing outside a fragment reruns on the fragment's own timer, only
+  on a full-page rerun (i.e. a button click). Moved inside the fragment; confirmed
+  ticking correctly in the same live test that caught it.
 - **A slow consumer must never run on the same thread as live capture.** The first
   version of `SessionCapture` called `AudioWorker.push_audio()` directly from the
   audio-capture thread. `push_audio()` triggers GPU transcription synchronously, which
@@ -260,11 +293,16 @@ Run the tests to confirm the setup works:
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q
 ```
-You should see `41 passed`. If GPU-related tests are added later and fail, that's a
+You should see `67 passed`. If GPU-related tests are added later and fail, that's a
 hardware/driver issue on your machine specifically — CPU fallback should still work
 (`analyzer/transcribe.py` falls back automatically and logs a warning). None of the
-current 41 tests actually require a GPU, webcam or microphone — they use fake
-transcriber/VAD/tracker objects, so they should pass identically on any machine.
+current 67 tests actually require a GPU, webcam or microphone — they use fake
+transcriber/VAD/tracker/AppTest objects, so they should pass identically on any machine.
+
+To actually see the live dashboard (needs a webcam and speakers/mic on your machine):
+```bash
+./.venv/Scripts/streamlit.exe run app.py
+```
 
 ## 7. Roadmap (8 weeks, from the synopsis)
 
@@ -273,16 +311,18 @@ transcriber/VAD/tracker objects, so they should pass identically on any machine.
 | 1 | Feasibility test: call capture + GPU transcription + face tracking together | **Audio: done.** Video: blocked on OBS install |
 | 2 | Audio worker: VAD + streaming transcript + pauses/WPM/fillers | **Done** (`analyzer/audio_worker.py`, tested against real audio) |
 | 3 | Video worker: gaze, head pose, blinks, calibration | **Done** (`analyzer/video_worker.py`, tested against a real webcam) |
-| 4 | Event log + live Streamlit dashboard | Event log **and live capture** done; Streamlit dashboard not started |
+| 4 | Event log + live Streamlit dashboard | **Done** (`analyzer/events.py`, `analyzer/capture.py`, `app.py` — all tested against real hardware) |
 | 5 | Fusion layer: rule-based scoring | Not started |
 | 6 | Feedback generator + background LLM scoring | Not started |
 | 7 | Data collection + evaluation (validation, rater agreement, ablation) | Not started |
 | 8 | Polish, demo rehearsal, final report | Not started |
 
-**We're ahead of the week-by-week schedule** (Weeks 2, 3, and the event-log half of
-Week 4 all done) — the remaining open item from Week 1, call-window video capture, is
-blocked on installing OBS Studio, not on anything technical. The next natural task is
-the Streamlit dashboard (`app.py`), reading live from `SessionCapture`'s event log.
+**We're ahead of the week-by-week schedule** — Weeks 2 through 4 are all done. The
+remaining open item from Week 1, call-window video capture, is blocked on installing
+OBS Studio, not on anything technical. The next natural task is Week 5: the rule-based
+fusion layer (`analyzer/fusion.py`), combining the metrics already being written to
+the event log into the three sub-scores (engagement, fluency, confidence) described in
+the synopsis.
 
 If behind schedule: drop background LLM scoring first, then the live transcript
 (keep live video + voice-activity metrics; transcribe after the session instead).
@@ -296,8 +336,14 @@ If behind schedule: drop background LLM scoring first, then the live transcript
 - `analyzer/audio_features.py` is pure logic with no hardware dependency, by design —
   keep it that way so it stays fast to test. Hardware-touching code goes in
   `transcribe.py`, `vad.py`, `capture.py`, `video.py`.
-- Ethics: the live dashboard is interviewer-only, never shown to the candidate.
-  Keep that boundary when building `app.py`.
+- Ethics: the live dashboard is interviewer-only, never shown to the candidate. Keep
+  that boundary — it's already true of `app.py`, don't add a candidate-facing view.
+- When adding real-time logic (a new worker, a new stage in `capture.py`), test it
+  against real hardware before calling it done, not just against fakes. Three separate
+  real bugs in this project so far were invisible to fake-based tests and only showed
+  up against actual audio/video/timing — see "Known gotchas" for all of them. The
+  `mcp__Claude_Browser__preview_start` tool (or `streamlit run app.py` directly) plus
+  actually watching the dashboard is how `app.py` itself was verified.
 
 ---
 
@@ -309,19 +355,22 @@ paste this to Claude:
 > Read `README.md` in full, then read `analyzer/config.py`, `analyzer/events.py`,
 > `analyzer/audio_features.py`, `analyzer/transcribe.py`, `analyzer/vad.py`,
 > `analyzer/audio_worker.py`, `analyzer/video_features.py`, `analyzer/video.py`,
-> `analyzer/video_worker.py` and `analyzer/capture.py` to see what's already built and
-> tested — pay particular attention to the "Known gotchas" section and the comments in
-> `audio_worker.py` and `capture.py`, which explain two real bugs (dropped words from a
-> bad chunking design, then dropped words again from a threading bug) that were found
-> by testing and fixed. Then run:
+> `analyzer/video_worker.py`, `analyzer/capture.py`, `analyzer/dashboard_data.py` and
+> `app.py` to see what's already built and tested — pay particular attention to the
+> "Known gotchas" section, which explains several real bugs (dropped words from a bad
+> chunking design, dropped words again from a threading bug, Whisper hallucinating on
+> silence, a frozen UI element) that were found by testing against real hardware and
+> fixed. Then run:
 >   `mkdir -p analyzer/models && curl -L -o analyzer/models/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`
 > (the face-tracking model isn't committed to git) and
 > `./.venv/Scripts/python.exe -m pytest tests/ -q` to confirm the setup works (expect
-> 49 passed — none of these need a camera, mic or GPU, they all use fakes). Then help
-> me build the Streamlit dashboard (`app.py`): a live, interviewer-only view that
-> starts a `SessionCapture` (see `analyzer/capture.py`) and polls its `EventLog` every
-> 1-2 seconds to show rolling camera-facing/WPM/pause/filler/blink indicators, a
-> timeline of flagged events (`long_pause`, `gaze_away`, `face_lost`), and a way to
-> mark question boundaries. Ask me first whether OBS Studio is installed yet — if it
-> is, `SessionCapture`'s video source can point at the OBS virtual camera device
-> instead of the plain webcam it's been validated against so far.
+> 67 passed — none of these need a camera, mic or GPU, they all use fakes). If you want
+> to see the actual dashboard, `./.venv/Scripts/streamlit.exe run app.py` needs a real
+> webcam and speakers/mic. Then help me build `analyzer/fusion.py` (Week 5): combine
+> the metrics already being written to the event log (camera_facing, pose_stability,
+> blink_rate, wpm, pause_rate, filler_rate) into the three rule-based sub-scores the
+> synopsis describes -- engagement, fluency, confidence -- each one traceable back to
+> its named inputs, not a black-box model (see the synopsis Sec 5.5 for the intended
+> formulas). Write it the way every other module here was written: pure functions
+> first, unit tested with plain numbers, no event-log or hardware dependency needed to
+> test the scoring math itself.

@@ -14,6 +14,13 @@ tests/test_audio_worker.py for the regression test and README.md's
 
 Because chunks are cut at silence, they don't overlap, and there's no need
 for the overlap/de-duplication logic a fixed-window design would need.
+
+A chunk is also skipped entirely (never sent to Whisper) if the VAD finds
+almost no speech in it. This was added after live testing against a real
+microphone picking up nothing but ambient room noise: Whisper reliably
+hallucinates short phrases -- "You", "Thank you" -- on near-silent audio,
+which would otherwise show up in the live transcript and skew WPM/pause
+metrics as if the candidate had actually spoken. See config.AUDIO.min_speech_fraction.
 """
 from __future__ import annotations
 
@@ -49,7 +56,8 @@ class AudioWorker:
                  sample_rate: int = AUDIO.sample_rate,
                  target_chunk_s: float = AUDIO.target_chunk_s,
                  max_chunk_s: float = AUDIO.max_chunk_s,
-                 min_chunk_s: float = AUDIO.min_chunk_s):
+                 min_chunk_s: float = AUDIO.min_chunk_s,
+                 min_speech_fraction: float = AUDIO.min_speech_fraction):
         if not (0 < min_chunk_s <= target_chunk_s <= max_chunk_s):
             raise ValueError("expected 0 < min_chunk_s <= target_chunk_s <= max_chunk_s")
         self.log = event_log
@@ -60,6 +68,7 @@ class AudioWorker:
         self.target_chunk_s = target_chunk_s
         self.max_chunk_s = max_chunk_s
         self.min_chunk_s = min_chunk_s
+        self.min_speech_fraction = min_speech_fraction
 
         self._buffer = np.zeros(0, dtype=np.float32)
         self._buffer_start_t = 0.0
@@ -125,14 +134,26 @@ class AudioWorker:
             return int(confirmed_ends[0] * self.sample_rate)
         return None  # still mid-speech (or unconfirmed) at target_chunk_s; let _drain() decide whether to wait
 
+    def _has_enough_speech(self, window: np.ndarray) -> bool:
+        """False if `window` is almost entirely silence/noise -- used to
+        skip calling Whisper at all on such chunks, since it otherwise
+        tends to hallucinate short phrases rather than return nothing."""
+        duration = len(window) / self.sample_rate
+        if duration <= 0:
+            return False
+        spans = self.vad.speech_spans(window)
+        speech_time = sum(s.end - s.start for s in spans)
+        return (speech_time / duration) >= self.min_speech_fraction
+
     def _process_window(self, cut_sample: int) -> None:
         window = self._buffer[:cut_sample]
         window_start_t = self._buffer_start_t
         window_end_t = window_start_t + len(window) / self.sample_rate
 
-        words = self.transcriber.transcribe_chunk(window, offset_s=window_start_t)
-        if words:
-            self._emit_words(words, window_start_t, window_end_t)
+        if self._has_enough_speech(window):
+            words = self.transcriber.transcribe_chunk(window, offset_s=window_start_t)
+            if words:
+                self._emit_words(words, window_start_t, window_end_t)
 
         self._buffer = self._buffer[cut_sample:]
         self._buffer_start_t = window_end_t
@@ -143,9 +164,10 @@ class AudioWorker:
             return
         window_start_t = self._buffer_start_t
         window_end_t = window_start_t + len(self._buffer) / self.sample_rate
-        words = self.transcriber.transcribe_chunk(self._buffer, offset_s=window_start_t)
-        if words:
-            self._emit_words(words, window_start_t, window_end_t)
+        if self._has_enough_speech(self._buffer):
+            words = self.transcriber.transcribe_chunk(self._buffer, offset_s=window_start_t)
+            if words:
+                self._emit_words(words, window_start_t, window_end_t)
         self._buffer = np.zeros(0, dtype=np.float32)
 
     def _emit_words(self, words: list[Word], segment_start: float, segment_end: float) -> None:
