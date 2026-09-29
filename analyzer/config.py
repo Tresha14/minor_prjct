@@ -15,8 +15,16 @@ class AudioConfig:
     whisper_compute_type: str = "int8"  # int8_float16 hung on this GTX 1650 during testing; int8 is confirmed working
     pause_threshold_s: float = 0.7     # gap between words counted as a "pause"
     long_pause_threshold_s: float = 3.0  # gap that gets flagged as a notable hesitation
-    chunk_seconds: float = 8.0         # length of each rolling audio chunk sent to Whisper
-    chunk_overlap_s: float = 1.0       # overlap between chunks so words at the boundary aren't lost
+
+    # Chunking: cuts are made at detected silence (via Silero VAD), not at a
+    # fixed time. A fixed-time cut risks slicing mid-word, which we found
+    # (by testing, not by guessing) makes Whisper silently DROP the speech
+    # right after the cut rather than mis-transcribe it -- see
+    # tests/test_audio_worker.py and README.md "Known gotchas".
+    target_chunk_s: float = 8.0        # aim to cut once buffered audio passes this length
+    max_chunk_s: float = 15.0          # force a cut here even mid-speech, so one long
+                                        # monologue can't stall transcription indefinitely
+    min_chunk_s: float = 2.0           # never cut a chunk shorter than this
 
 
 @dataclass(frozen=True)
