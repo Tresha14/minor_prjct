@@ -189,7 +189,7 @@ minor_project/
   calculation exactly (down to driver-by-driver percentages), proving the whole chain
   — event log → `compute_from_log` → `compute_scores` → dashboard tiles — is wired
   correctly end to end in the actual running app.
-- 91/91 tests passing.
+- 92/92 tests passing.
 
 ### Not started yet
 - **Call-window video capture via OBS Virtual Camera.** `capture.py`'s `VideoSource`
@@ -207,6 +207,29 @@ minor_project/
   `fusion.py`'s reference ranges against real human ratings — Week 7.
 
 ### Known gotchas (read before touching audio/GPU code)
+- **Calibration must be visible to whoever's on camera, or it silently ruins the
+  session.** `VideoWorker`'s first `calibration_seconds` (~8s) become the "normal"
+  baseline that everything else is compared against — but that window used to run with
+  zero on-screen indication. Found by an actual user test: the dashboard showed
+  near-constant "looking away from camera" and "not visible in frame" for almost the
+  whole session, which looked like the system was broken. It wasn't — the person being
+  tracked had no way to know those first 8 seconds mattered, so their baseline got set
+  from whatever position they happened to be in (most likely looking at the dashboard,
+  not the lens), and every bit of normal posture afterward read as a deviation from it.
+  Fixed with `VideoWorker.calibration_seconds_remaining()` plus a prominent warning
+  banner + progress bar in `app.py` telling the person exactly when to look at the
+  camera and for how long. **If you ever see near-100% "looking away" events again,
+  check whether the person looked at the camera during calibration before assuming the
+  scoring math is wrong.**
+- **"No speech transcribed" during a solo test is by design, not a bug.** The candidate
+  (transcribed) channel is wired to speaker loopback — simulating a candidate's voice
+  coming over a call — while a lone tester's own microphone is wired to the interviewer
+  channel, which is only tracked for speaking presence and never transcribed. Testing
+  alone by just talking into your own mic will correctly show an empty transcript.
+  `SessionCapture(..., solo_test_mode=True)` (exposed as a checkbox in `app.py`, off by
+  default) points the transcribed channel at your own microphone instead, purely for
+  testing/demos — never use it for an actual interview, since it skips the interviewer
+  channel entirely.
 - **Whisper hallucinates short phrases on near-silent audio — gate transcription on
   detected speech, don't just gate the cut point.** Live-tested `app.py` against a real
   microphone with only ambient room noise (no one speaking) and the transcript showed
@@ -318,7 +341,7 @@ Run the tests to confirm the setup works:
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q
 ```
-You should see `91 passed`. If GPU-related tests are added later and fail, that's a
+You should see `92 passed`. If GPU-related tests are added later and fail, that's a
 hardware/driver issue on your machine specifically — CPU fallback should still work
 (`analyzer/transcribe.py` falls back automatically and logs a warning). None of the
 current 91 tests actually require a GPU, webcam or microphone — they use fake
@@ -391,7 +414,7 @@ paste this to Claude:
 >   `mkdir -p analyzer/models && curl -L -o analyzer/models/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`
 > (the face-tracking model isn't committed to git) and
 > `./.venv/Scripts/python.exe -m pytest tests/ -q` to confirm the setup works (expect
-> 91 passed — none of these need a camera, mic or GPU, they all use fakes). If you want
+> 92 passed — none of these need a camera, mic or GPU, they all use fakes). If you want
 > to see the actual dashboard, including the live fusion scores, `./.venv/Scripts/streamlit.exe run app.py`
 > needs a real webcam and speakers/mic. Then help me build `analyzer/feedback.py`
 > (Week 6): turn a `FusionResult` (see `analyzer/fusion.py`) into three to five
