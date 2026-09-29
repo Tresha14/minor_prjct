@@ -85,7 +85,7 @@ minor_project/
     video_features.py     DONE  pure functions: head pose, calibrated baseline, blinks, stability
     video.py                DONE  MediaPipe FaceLandmarker wrapper (Tasks API)
     video_worker.py           DONE  live pipeline: calibration + camera-facing/pose/blink metrics
-    capture.py                  TODO  call-window video + system-audio loopback capture
+    capture.py                  DONE  live capture: webcam/loopback/mic wired into the workers
     text.py                       TODO  hedging, sentiment, answer relevance
     fusion.py                  TODO  combines everything into engagement/fluency/confidence
     feedback.py                  TODO  turns scores into coaching tips
@@ -140,17 +140,28 @@ minor_project/
   camera). Confirmed end-to-end on the real webcam: calibration completed correctly,
   camera-facing/pose-stability/blink metrics all came out with sane values, no crashes
   over an 8-second live run.
-- 41/41 tests passing.
+- **Live capture** (`analyzer/capture.py`) — `SessionCapture` wires a real webcam,
+  real loopback audio (candidate) and a real microphone (interviewer) into
+  `VideoWorker` and `AudioWorker` continuously, each source running in its own
+  background thread. Confirmed working end-to-end: played the 29-word test clip through
+  the speaker while the webcam ran and `SessionCapture` captured both — **all 29 words
+  came out correct**, camera-facing/pose/blink metrics were written throughout, and the
+  interviewer channel's speaking-fraction metric worked too. 9 tests in
+  `tests/test_capture.py` (pure logic — mono conversion, interval batching, and the
+  threading/queue behavior described below — no camera or mic needed to run them).
+  Found and fixed a real bug in the process — see "Known gotchas".
+- 49/49 tests passing.
 
 ### Not started yet
-- `analyzer/capture.py` — call-window video capture via **OBS Virtual Camera**, plus
-  wiring the confirmed-working `soundcard` loopback/mic capture and the confirmed-working
-  webcam capture into real live feeds for `audio_worker.py` / `video_worker.py` (so far
-  both have only been fed pre-recorded clips / a live webcam loop in a test script, not
-  wired into a proper capture module — the worker logic doesn't care where frames/audio
-  come from, but this hasn't been packaged up yet). **Blocked: OBS Studio is not
-  installed on the dev machine yet.** Until it is, video work can proceed against a
-  plain webcam (confirmed working) as a stand-in. **This is the natural next task.**
+- **Call-window video capture via OBS Virtual Camera.** `capture.py`'s `VideoSource`
+  works with any camera device index, so once OBS is installed its virtual camera can
+  be used as-is — nothing in the code needs to change, just point `camera_index` at it
+  (see `analyzer/capture.py`'s docstring). **Blocked: OBS Studio is not installed on
+  the dev machine yet.** Until it is, `capture.py` has been developed and validated
+  against a plain webcam instead. **This is the natural next task**, alongside
+  `run_session.py` (a real entry point that starts a `SessionCapture` and runs the
+  Streamlit dashboard against it — right now `SessionCapture` is only driven by an
+  ad-hoc test script).
 - `analyzer/text.py` — hedging/sentiment/answer-relevance (Week 4 in the plan).
 - `analyzer/video.py` — MediaPipe face/gaze/head-pose tracking (Week 3 in the plan).
 - `analyzer/fusion.py`, `analyzer/feedback.py`, `app.py` (Streamlit dashboard),
@@ -158,6 +169,22 @@ minor_project/
 - `evaluation/` scripts, real dataset collection — Week 7.
 
 ### Known gotchas (read before touching audio/GPU code)
+- **A slow consumer must never run on the same thread as live capture.** The first
+  version of `SessionCapture` called `AudioWorker.push_audio()` directly from the
+  audio-capture thread. `push_audio()` triggers GPU transcription synchronously, which
+  can take a second or more — for that whole time, the thread wasn't reading from the
+  microphone either, so the OS-level audio buffer overflowed and **real words were
+  permanently dropped**, not just delayed (confirmed by testing: word count went from
+  29/29 to 20/29 with this bug present). The fix is `capture.py`'s `QueuedConsumer`:
+  the capture thread just enqueues audio and returns immediately; a separate thread
+  drains the queue and does the slow transcription. If you ever add another
+  slow/blocking step to a live pipeline, it needs the same pattern — a fast producer
+  thread must never call directly into a slow handler.
+- **Unthrottled video capture competes for CPU with everything else.** A related fix:
+  `VideoSource` supports a `target_fps` throttle (so MediaPipe doesn't run on every raw
+  camera frame, ~30fps), but `SessionCapture` wasn't actually passing
+  `config.VIDEO.target_fps` into it — an oversight caught by the same test that found
+  the threading bug above. Both fixes together were needed to get a clean 29/29 words.
 - **Chunk boundaries must land on detected silence, never a fixed time offset.** An
   earlier version of `audio_worker.py` cut every 8 seconds with a 1-second overlap and
   de-duplicated by timestamp. Tested against real GPU transcription of a spoken clip,
@@ -246,15 +273,16 @@ transcriber/VAD/tracker objects, so they should pass identically on any machine.
 | 1 | Feasibility test: call capture + GPU transcription + face tracking together | **Audio: done.** Video: blocked on OBS install |
 | 2 | Audio worker: VAD + streaming transcript + pauses/WPM/fillers | **Done** (`analyzer/audio_worker.py`, tested against real audio) |
 | 3 | Video worker: gaze, head pose, blinks, calibration | **Done** (`analyzer/video_worker.py`, tested against a real webcam) |
-| 4 | Event log + live Streamlit dashboard | Event log done; dashboard not started |
+| 4 | Event log + live Streamlit dashboard | Event log **and live capture** done; Streamlit dashboard not started |
 | 5 | Fusion layer: rule-based scoring | Not started |
 | 6 | Feedback generator + background LLM scoring | Not started |
 | 7 | Data collection + evaluation (validation, rater agreement, ablation) | Not started |
 | 8 | Polish, demo rehearsal, final report | Not started |
 
-**We're ahead of the week-by-week schedule** (Weeks 2 and 3 done while still early) —
-the remaining open item from Week 1, call-window video capture, is blocked on
-installing OBS Studio, not on anything technical.
+**We're ahead of the week-by-week schedule** (Weeks 2, 3, and the event-log half of
+Week 4 all done) — the remaining open item from Week 1, call-window video capture, is
+blocked on installing OBS Studio, not on anything technical. The next natural task is
+the Streamlit dashboard (`app.py`), reading live from `SessionCapture`'s event log.
 
 If behind schedule: drop background LLM scoring first, then the live transcript
 (keep live video + voice-activity metrics; transcribe after the session instead).
@@ -280,22 +308,20 @@ paste this to Claude:
 
 > Read `README.md` in full, then read `analyzer/config.py`, `analyzer/events.py`,
 > `analyzer/audio_features.py`, `analyzer/transcribe.py`, `analyzer/vad.py`,
-> `analyzer/audio_worker.py`, `analyzer/video_features.py`, `analyzer/video.py` and
-> `analyzer/video_worker.py` to see what's already built and tested — pay particular
-> attention to the "Known gotchas" section and the comments at the top of
-> `audio_worker.py`, which explain a real word-dropping bug that was found and fixed
-> there. Then run:
+> `analyzer/audio_worker.py`, `analyzer/video_features.py`, `analyzer/video.py`,
+> `analyzer/video_worker.py` and `analyzer/capture.py` to see what's already built and
+> tested — pay particular attention to the "Known gotchas" section and the comments in
+> `audio_worker.py` and `capture.py`, which explain two real bugs (dropped words from a
+> bad chunking design, then dropped words again from a threading bug) that were found
+> by testing and fixed. Then run:
 >   `mkdir -p analyzer/models && curl -L -o analyzer/models/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`
 > (the face-tracking model isn't committed to git) and
 > `./.venv/Scripts/python.exe -m pytest tests/ -q` to confirm the setup works (expect
-> 41 passed — none of these need a camera, mic or GPU, they all use fake
-> transcriber/VAD/tracker objects). Then help me build `analyzer/capture.py`:
-> call-window video capture (via OBS Virtual Camera, once it's installed) and
-> system-audio loopback + microphone capture using `soundcard` (both already confirmed
-> working end-to-end in manual testing — see the README status section for how). It
-> needs to feed live frames/audio into `VideoWorker.process_frame()` and
-> `AudioWorker.push_audio()` continuously — both workers already exist and are tested
-> against fakes, they've just never been driven by a real *capture* module before, only
-> by one-off test scripts. Ask me first whether OBS Studio is installed yet; if not,
-> start with a plain webcam via OpenCV as a stand-in for video, since that's already
-> confirmed working too.
+> 49 passed — none of these need a camera, mic or GPU, they all use fakes). Then help
+> me build the Streamlit dashboard (`app.py`): a live, interviewer-only view that
+> starts a `SessionCapture` (see `analyzer/capture.py`) and polls its `EventLog` every
+> 1-2 seconds to show rolling camera-facing/WPM/pause/filler/blink indicators, a
+> timeline of flagged events (`long_pause`, `gaze_away`, `face_lost`), and a way to
+> mark question boundaries. Ask me first whether OBS Studio is installed yet — if it
+> is, `SessionCapture`'s video source can point at the OBS virtual camera device
+> instead of the plain webcam it's been validated against so far.

@@ -1,0 +1,293 @@
+"""Live capture: wires a real camera and real audio devices into the
+already-tested VideoWorker / AudioWorker pipelines.
+
+Everything in video_worker.py and audio_worker.py has, until now, only ever
+been driven by fakes (for the test suite) or by one-off test scripts feeding
+pre-recorded clips / a short-lived webcam loop. This module is what makes it
+a real live system: three background threads (video, candidate audio,
+interviewer audio) each read from a hardware source and push into the
+workers continuously.
+
+Sources used (all confirmed working manually earlier in this project, see
+README.md "Known gotchas" / status section):
+  - Video: a plain webcam via OpenCV (`cv2.VideoCapture`). Swapping this for
+    an OBS Virtual Camera later is just picking a different device index --
+    see `list_video_devices()` / the `camera_index` parameter -- once OBS is
+    installed, its virtual camera shows up as an ordinary camera device.
+  - Candidate audio: system-audio loopback via `soundcard` (captures
+    whatever the interviewer's speakers are playing -- i.e. the candidate's
+    side of the call).
+  - Interviewer audio: the default microphone via `soundcard`. We only run
+    a lightweight VAD-based "speaking fraction" on this channel, not full
+    transcription -- the interviewer isn't who's being coached, so spending
+    GPU time transcribing them isn't worth it. It's kept as a separate
+    stream mainly so candidate/interviewer speech never gets mixed
+    together (see the synopsis, Sec 5.1: "kept separate, no speaker
+    mixing").
+
+Threading note: SQLite (via EventLog) handles concurrent writers itself
+(each call opens its own short-lived connection in WAL mode), so the three
+threads writing to the same event log is safe. VideoWorker / AudioWorker
+are each only ever driven by their own single thread, so no locking is
+needed around them.
+"""
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+import time
+from dataclasses import dataclass
+
+import numpy as np
+
+from analyzer.audio_worker import AudioWorker
+from analyzer.config import AUDIO, VIDEO
+from analyzer.events import EventLog
+from analyzer.vad import VoiceActivityDetector
+from analyzer.video_worker import VideoWorker
+
+logger = logging.getLogger(__name__)
+
+
+def to_mono_float32(chunk: np.ndarray) -> np.ndarray:
+    """Averages a (frames, channels) array down to mono float32. Also
+    accepts an already-mono 1-D array unchanged. Pure function, unit tested
+    in tests/test_capture.py without touching any audio device.
+    """
+    arr = np.asarray(chunk, dtype=np.float32)
+    if arr.ndim > 1 and arr.shape[1] > 1:
+        arr = arr.mean(axis=1)
+    return arr.reshape(-1).astype(np.float32)
+
+
+class VideoSource:
+    """Reads frames from a camera (webcam, or an OBS Virtual Camera once
+    installed -- it appears as an ordinary camera device index) in a
+    background thread and calls `on_frame(frame_bgr, t)` for each one.
+    """
+
+    def __init__(self, camera_index: int = 0, target_fps: float | None = None):
+        self.camera_index = camera_index
+        self.target_fps = target_fps
+        self._cap = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def start(self, on_frame, t0: float) -> None:
+        import cv2
+        self._cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+        if not self._cap.isOpened():
+            raise RuntimeError(f"Could not open camera index {self.camera_index}")
+
+        min_interval = (1.0 / self.target_fps) if self.target_fps else 0.0
+
+        def _loop():
+            last_frame_t = 0.0
+            while not self._stop.is_set():
+                ok, frame = self._cap.read()
+                if not ok:
+                    logger.warning("VideoSource: camera read failed, stopping")
+                    break
+                t = time.time() - t0
+                if t - last_frame_t < min_interval:
+                    continue  # throttle to target_fps without blocking the capture thread
+                last_frame_t = t
+                on_frame(frame, t)
+            self._cap.release()
+
+        self._thread = threading.Thread(target=_loop, name="VideoSource", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=timeout)
+
+
+class AudioSource:
+    """Reads audio from a `soundcard` device (a loopback speaker-as-mic, or
+    an ordinary microphone) in a background thread and calls
+    `on_chunk(mono_float32_chunk, t)` for each piece captured.
+
+    `chunk_seconds` trades latency for robustness: too small and
+    `soundcard` logs "data discontinuity" warnings (dropped audio) under
+    load; too large and live metrics lag further behind real time. 0.25s
+    was chosen empirically as a reasonable middle ground -- see README.md
+    "Known gotchas" for the discontinuity issue this is working around.
+    """
+
+    def __init__(self, device, sample_rate: int = AUDIO.sample_rate, chunk_seconds: float = 0.25):
+        self.device = device
+        self.sample_rate = sample_rate
+        self.chunk_seconds = chunk_seconds
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def start(self, on_chunk, t0: float) -> None:
+        numframes = int(self.chunk_seconds * self.sample_rate)
+
+        def _loop():
+            with self.device.recorder(samplerate=self.sample_rate) as rec:
+                while not self._stop.is_set():
+                    raw = rec.record(numframes=numframes)
+                    t = time.time() - t0
+                    on_chunk(to_mono_float32(raw), t)
+
+        self._thread = threading.Thread(target=_loop, name=f"AudioSource({self.device})", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=timeout)
+
+
+class QueuedConsumer:
+    """Decouples a fast producer (audio/video capture) from a potentially
+    slow consumer (e.g. GPU transcription) via a background thread reading
+    off a queue, so the consumer's own latency can never block the capture
+    thread that's supposed to be reading from the microphone/camera in
+    real time.
+
+    This isn't a hypothetical concern: an earlier version of SessionCapture
+    called AudioWorker.push_audio() directly from the audio-capture thread.
+    Whisper transcription runs synchronously inside push_audio() and can
+    take a second or more, so for that whole time the same thread wasn't
+    reading from the microphone either -- confirmed by testing to cause
+    real, permanent word loss (not just lag), because the OS-level audio
+    buffer overflows while nobody's draining it. See README.md's "Known
+    gotchas" section.
+    """
+
+    def __init__(self, handler):
+        self._handler = handler
+        self._queue: queue.Queue = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def put(self, *args) -> None:
+        self._queue.put(args)
+
+    def start(self) -> None:
+        def _loop():
+            while not (self._stop.is_set() and self._queue.empty()):
+                try:
+                    args = self._queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                self._handler(*args)
+
+        self._thread = threading.Thread(target=_loop, name="QueuedConsumer", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 10.0) -> None:
+        """Signals no more items will arrive and waits for the queue to
+        drain -- so audio captured right up to the last moment still gets
+        transcribed rather than silently dropped on shutdown."""
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=timeout)
+
+
+def default_loopback_device():
+    """The candidate's audio: whatever the interviewer's speakers are
+    playing, captured via loopback (confirmed working -- see README.md)."""
+    import soundcard as sc
+    speaker = sc.default_speaker()
+    return sc.get_microphone(speaker.name, include_loopback=True)
+
+
+def default_microphone_device():
+    """The interviewer's own voice."""
+    import soundcard as sc
+    return sc.default_microphone()
+
+
+@dataclass
+class InterviewerMonitor:
+    """Lightweight stand-in for a full AudioWorker on the interviewer's
+    channel: just tracks how much of each interval was spent speaking, via
+    VAD, with no transcription. See this module's docstring for why.
+    """
+    log: EventLog
+    vad: VoiceActivityDetector
+    source: str = "audio_interviewer"
+    interval_s: float = 2.0
+    _buffer: np.ndarray = None
+    _last_metric_t: float = 0.0
+
+    def __post_init__(self):
+        self._buffer = np.zeros(0, dtype=np.float32)
+
+    def push_audio(self, chunk: np.ndarray, t: float) -> None:
+        self._buffer = np.concatenate([self._buffer, chunk])
+        if t - self._last_metric_t >= self.interval_s and len(self._buffer) > 0:
+            fraction = self.vad.speaking_fraction(self._buffer)
+            self.log.metric(self.source, "speaking_fraction", fraction, t=t)
+            self._buffer = np.zeros(0, dtype=np.float32)
+            self._last_metric_t = t
+
+
+class SessionCapture:
+    """Owns the whole live capture session: opens the event log, starts the
+    three background sources, and wires them into VideoWorker / AudioWorker
+    / InterviewerMonitor. Use as a context manager or call start()/stop().
+
+        with SessionCapture(session_dir, transcriber, tracker) as session:
+            time.sleep(60)   # let it run
+        # workers are flushed and the log is finalised on exit
+    """
+
+    def __init__(self, session_dir, transcriber, face_tracker,
+                 camera_index: int = 0, candidate_device=None, interviewer_device=None):
+        self.log = EventLog(session_dir)
+        self.video_worker = VideoWorker(self.log, face_tracker, source="video")
+        self.candidate_worker = AudioWorker(self.log, transcriber, VoiceActivityDetector(),
+                                             source="audio_candidate")
+        self.interviewer_monitor = InterviewerMonitor(self.log, VoiceActivityDetector())
+
+        # target_fps matters beyond just analysis granularity: running
+        # MediaPipe on every raw webcam frame (unthrottled, ~30fps) was
+        # found by testing to starve the audio-capture threads of CPU time
+        # badly enough to drop words near the end of a clip (see README.md
+        # "Known gotchas"). Throttling video to VIDEO.target_fps fixed it.
+        self.video_source = VideoSource(camera_index=camera_index, target_fps=VIDEO.target_fps)
+        self.candidate_source = AudioSource(candidate_device or default_loopback_device())
+        self.interviewer_source = AudioSource(interviewer_device or default_microphone_device())
+
+        # Candidate audio goes through a queue (see QueuedConsumer) because
+        # its handler does GPU transcription, which is slow enough to cause
+        # real dropped audio if it ran on the capture thread itself. The
+        # interviewer channel and video frames are cheap enough (VAD-only,
+        # and a throttled MediaPipe call) that this hasn't been needed for
+        # them -- if that ever changes, the same pattern applies.
+        self._candidate_queue = QueuedConsumer(self.candidate_worker.push_audio)
+
+        self._t0 = None
+
+    def start(self) -> None:
+        self._t0 = time.time()
+        self.log.session_start(t0=self._t0)
+        self._candidate_queue.start()
+        self.video_source.start(self.video_worker.process_frame, self._t0)
+        self.candidate_source.start(self._candidate_queue.put, self._t0)
+        self.interviewer_source.start(self.interviewer_monitor.push_audio, self._t0)
+        logger.info("SessionCapture started, writing to %s", self.log.db_path)
+
+    def stop(self) -> None:
+        self.video_source.stop()
+        self.candidate_source.stop()
+        self.interviewer_source.stop()
+        self._candidate_queue.stop()  # drains whatever was captured right up to the end
+        t_end = time.time() - self._t0 if self._t0 else 0.0
+        self.video_worker.finish(t_end)
+        self.candidate_worker.flush()
+        logger.info("SessionCapture stopped at t=%.1fs", t_end)
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop()
