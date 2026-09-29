@@ -82,9 +82,11 @@ minor_project/
     transcribe.py        DONE  faster-whisper wrapper, GPU with automatic CPU fallback
     vad.py               DONE  Silero voice-activity detection wrapper
     audio_worker.py      DONE  live pipeline: silence-aware chunking + transcription + stats
-    capture.py            TODO  call-window video + system-audio loopback capture
-    video.py               TODO  MediaPipe face/gaze/head-pose tracking
-    text.py                  TODO  hedging, sentiment, answer relevance
+    video_features.py     DONE  pure functions: head pose, calibrated baseline, blinks, stability
+    video.py                DONE  MediaPipe FaceLandmarker wrapper (Tasks API)
+    video_worker.py           DONE  live pipeline: calibration + camera-facing/pose/blink metrics
+    capture.py                  TODO  call-window video + system-audio loopback capture
+    text.py                       TODO  hedging, sentiment, answer relevance
     fusion.py                  TODO  combines everything into engagement/fluency/confidence
     feedback.py                  TODO  turns scores into coaching tips
   app.py                          TODO  Streamlit live dashboard
@@ -122,16 +124,34 @@ minor_project/
   and got back the exact original words. Candidate (loopback) + interviewer (microphone)
   channels also confirmed recording **simultaneously** without conflict.
 - **Plain webcam capture** via OpenCV — confirmed working as a fallback.
-- 21/21 tests passing.
+- **Face/head-pose tracking** (`analyzer/video.py`, `analyzer/video_features.py`) —
+  MediaPipe's FaceLandmarker (Tasks API, not the older deprecated `mp.solutions`),
+  giving head-pose (yaw/pitch/roll, decomposed from MediaPipe's rotation matrix via
+  scipy) and blendshape scores (used for blink detection — more reliable than manually
+  computing eye-aspect-ratio from raw landmarks). Confirmed working on the real webcam:
+  121/121 frames detected a face over a 4-second test. 14 tests in
+  `tests/test_video_features.py` — including a matrix↔euler round-trip check so the
+  pose math is verified independent of the camera.
+- **Live video pipeline** (`analyzer/video_worker.py`) — per-session calibration (looks
+  at the camera for `VIDEO.calibration_seconds`, averages that into a baseline), then
+  compares every subsequent frame against that baseline for camera-facing %, tracks a
+  rolling pose-stability window, counts blinks, and raises `gaze_away` / `face_lost`
+  events. 6 tests in `tests/test_video_worker.py` using a fake tracker (fast, no
+  camera). Confirmed end-to-end on the real webcam: calibration completed correctly,
+  camera-facing/pose-stability/blink metrics all came out with sane values, no crashes
+  over an 8-second live run.
+- 41/41 tests passing.
 
 ### Not started yet
 - `analyzer/capture.py` — call-window video capture via **OBS Virtual Camera**, plus
-  wiring the confirmed-working `soundcard` loopback/mic capture into a real live feed
-  for `audio_worker.py` (so far it's been fed pre-recorded clips in testing, not a
-  live stream — the chunking logic doesn't care which, but this hasn't been run
-  against a truly live mic yet). **Blocked: OBS Studio is not installed on the dev
-  machine yet.** Until it is, video work can proceed against a plain webcam (confirmed
-  working) as a stand-in. **This is the natural next task.**
+  wiring the confirmed-working `soundcard` loopback/mic capture and the confirmed-working
+  webcam capture into real live feeds for `audio_worker.py` / `video_worker.py` (so far
+  both have only been fed pre-recorded clips / a live webcam loop in a test script, not
+  wired into a proper capture module — the worker logic doesn't care where frames/audio
+  come from, but this hasn't been packaged up yet). **Blocked: OBS Studio is not
+  installed on the dev machine yet.** Until it is, video work can proceed against a
+  plain webcam (confirmed working) as a stand-in. **This is the natural next task.**
+- `analyzer/text.py` — hedging/sentiment/answer-relevance (Week 4 in the plan).
 - `analyzer/video.py` — MediaPipe face/gaze/head-pose tracking (Week 3 in the plan).
 - `analyzer/fusion.py`, `analyzer/feedback.py`, `app.py` (Streamlit dashboard),
   `run_session.py` — all later weeks.
@@ -172,6 +192,22 @@ minor_project/
 - Two OpenCV packages get installed (`opencv-python` + `opencv-contrib-python`, the
   second pulled in by MediaPipe). Harmless so far; if `cv2` starts behaving oddly,
   that's the first thing to check.
+- **The face-tracking model file is not in git** (`analyzer/models/face_landmarker.task`,
+  ~3.7 MB of binary weights) — it's gitignored and every dev downloads their own copy.
+  See the Setup section below. `analyzer/video.py`'s `FaceTracker` raises a clear
+  `FileNotFoundError` (not a cryptic MediaPipe error) if it's missing.
+  `mediapipe==1.0.1` uses the newer Tasks API (`mediapipe.tasks.python.vision`), not the
+  older `mp.solutions.face_mesh` — if you find older MediaPipe example code online, it
+  likely uses the deprecated API and won't match this codebase.
+- **`video_features.py`'s yaw/pitch/roll sign convention hasn't been independently
+  verified against MediaPipe's own convention** (e.g. "does yaw actually increase when
+  you turn right") — the round-trip math is tested and correct, but that only proves
+  `matrix_to_euler` and `euler_to_matrix` are exact inverses of each other, not what a
+  positive number *means* physically. This matters less than it sounds because every
+  comparison in the project is against a per-session calibrated `Baseline`, not an
+  absolute "0 = facing camera" assumption — but worth a quick manual check (turn your
+  head right, print the yaw, confirm it moves the direction you'd expect) before
+  trusting the raw numbers in a debugger.
 
 ## 6. Setup
 
@@ -186,13 +222,22 @@ python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
+Download the face-tracking model (not committed to git — see "Known gotchas"):
+```bash
+mkdir -p analyzer/models
+curl -L -o analyzer/models/face_landmarker.task \
+  https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+```
+
 Run the tests to confirm the setup works:
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q
 ```
-You should see `14 passed`. If GPU-related tests are added later and fail, that's a
+You should see `41 passed`. If GPU-related tests are added later and fail, that's a
 hardware/driver issue on your machine specifically — CPU fallback should still work
-(`analyzer/transcribe.py` falls back automatically and logs a warning).
+(`analyzer/transcribe.py` falls back automatically and logs a warning). None of the
+current 41 tests actually require a GPU, webcam or microphone — they use fake
+transcriber/VAD/tracker objects, so they should pass identically on any machine.
 
 ## 7. Roadmap (8 weeks, from the synopsis)
 
@@ -200,12 +245,16 @@ hardware/driver issue on your machine specifically — CPU fallback should still
 |---|---|---|
 | 1 | Feasibility test: call capture + GPU transcription + face tracking together | **Audio: done.** Video: blocked on OBS install |
 | 2 | Audio worker: VAD + streaming transcript + pauses/WPM/fillers | **Done** (`analyzer/audio_worker.py`, tested against real audio) |
-| 3 | Video worker: gaze, head pose, blinks, calibration | Not started |
+| 3 | Video worker: gaze, head pose, blinks, calibration | **Done** (`analyzer/video_worker.py`, tested against a real webcam) |
 | 4 | Event log + live Streamlit dashboard | Event log done; dashboard not started |
 | 5 | Fusion layer: rule-based scoring | Not started |
 | 6 | Feedback generator + background LLM scoring | Not started |
 | 7 | Data collection + evaluation (validation, rater agreement, ablation) | Not started |
 | 8 | Polish, demo rehearsal, final report | Not started |
+
+**We're ahead of the week-by-week schedule** (Weeks 2 and 3 done while still early) —
+the remaining open item from Week 1, call-window video capture, is blocked on
+installing OBS Studio, not on anything technical.
 
 If behind schedule: drop background LLM scoring first, then the live transcript
 (keep live video + voice-activity metrics; transcribe after the session instead).
@@ -230,15 +279,23 @@ If you're starting a fresh Claude Code session on this repo with no prior contex
 paste this to Claude:
 
 > Read `README.md` in full, then read `analyzer/config.py`, `analyzer/events.py`,
-> `analyzer/audio_features.py`, `analyzer/transcribe.py`, `analyzer/vad.py` and
-> `analyzer/audio_worker.py` to see what's already built and tested — pay particular
+> `analyzer/audio_features.py`, `analyzer/transcribe.py`, `analyzer/vad.py`,
+> `analyzer/audio_worker.py`, `analyzer/video_features.py`, `analyzer/video.py` and
+> `analyzer/video_worker.py` to see what's already built and tested — pay particular
 > attention to the "Known gotchas" section and the comments at the top of
 > `audio_worker.py`, which explain a real word-dropping bug that was found and fixed
-> there. Run `./.venv/Scripts/python.exe -m pytest tests/ -q` to confirm the setup
-> works (expect 21 passed). Then help me build `analyzer/capture.py`: call-window
-> video capture (via OBS Virtual Camera, once it's installed) and system-audio
-> loopback + microphone capture using `soundcard` (already confirmed working
-> end-to-end in manual testing — see the README status section for how). It needs to
-> feed live audio into `AudioWorker.push_audio()` continuously. Ask me first whether
-> OBS Studio is installed yet; if not, start with a plain webcam via OpenCV as a
-> stand-in for video, since that's already confirmed working too.
+> there. Then run:
+>   `mkdir -p analyzer/models && curl -L -o analyzer/models/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`
+> (the face-tracking model isn't committed to git) and
+> `./.venv/Scripts/python.exe -m pytest tests/ -q` to confirm the setup works (expect
+> 41 passed — none of these need a camera, mic or GPU, they all use fake
+> transcriber/VAD/tracker objects). Then help me build `analyzer/capture.py`:
+> call-window video capture (via OBS Virtual Camera, once it's installed) and
+> system-audio loopback + microphone capture using `soundcard` (both already confirmed
+> working end-to-end in manual testing — see the README status section for how). It
+> needs to feed live frames/audio into `VideoWorker.process_frame()` and
+> `AudioWorker.push_audio()` continuously — both workers already exist and are tested
+> against fakes, they've just never been driven by a real *capture* module before, only
+> by one-off test scripts. Ask me first whether OBS Studio is installed yet; if not,
+> start with a plain webcam via OpenCV as a stand-in for video, since that's already
+> confirmed working too.

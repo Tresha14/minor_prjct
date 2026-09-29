@@ -31,7 +31,15 @@ class AudioConfig:
 class VideoConfig:
     target_fps: float = 10.0           # analysis frame rate; the source video can be higher
     calibration_seconds: float = 8.0   # "look at the camera" window used to set the baseline
-    ear_blink_threshold: float = 0.21  # eye-aspect-ratio below this counts as an eye closure
+    blink_score_threshold: float = 0.5  # MediaPipe eyeBlinkLeft/Right blendshape score (0-1,
+                                         # 1=fully closed) above this counts as an eye closure
+    facing_yaw_tolerance_deg: float = 15.0   # allowed drift from the calibrated baseline yaw
+    facing_pitch_tolerance_deg: float = 15.0  # allowed drift from the calibrated baseline pitch
+    pose_window_s: float = 3.0         # rolling window used to compute head-pose stability
+    metric_interval_s: float = 2.0     # how often camera_facing/pose_stability/blink_rate are written
+    gaze_away_threshold: float = 0.3   # camera_facing fraction below this over an interval -> flagged event
+    face_lost_min_s: float = 1.0       # minimum gap with no face detected before it's logged as an event
+    model_path: str = "analyzer/models/face_landmarker.task"
 
 
 @dataclass(frozen=True)
