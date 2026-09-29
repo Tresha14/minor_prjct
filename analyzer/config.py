@@ -57,6 +57,40 @@ class TextConfig:
         "um", "uh", "umm", "uhh", "erm", "hmm", "like", "you know", "so yeah",
     )
 
+    # Lexicon-based sentiment (analyzer/text.py) -- rule-based like every
+    # other scoring layer in this project, for the same reason fusion.py
+    # gives for not training a model: too little data collected here to
+    # fine-tune or trust a model responsibly, and a word-list score is
+    # transparent and defensible in a viva. Interview-context word choices,
+    # not a general-purpose sentiment lexicon.
+    positive_words: tuple = (
+        "confident", "excited", "enthusiastic", "prepared", "comfortable",
+        "motivated", "capable", "skilled", "successful", "effective",
+        "strong", "passionate", "proud", "accomplished", "eager", "great",
+        "good", "positive", "improved", "achieved",
+    )
+    negative_words: tuple = (
+        "nervous", "unsure", "worried", "confused", "difficult", "struggled",
+        "weak", "uncomfortable", "hesitant", "doubt", "anxious", "poor",
+        "negative", "failed", "afraid", "stressed", "overwhelmed", "bad",
+        "mistake", "problem",
+    )
+
+    # Stopwords excluded before comparing question/answer word overlap
+    # (analyzer/text.py's answer_relevance) -- without this, two unrelated
+    # sentences that both happen to use "the", "a", "is" etc. would look
+    # artificially relevant.
+    stopwords: tuple = (
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+        "to", "of", "in", "on", "at", "for", "and", "or", "but", "with",
+        "as", "by", "that", "this", "these", "those", "it", "its", "i",
+        "you", "he", "she", "they", "we", "do", "does", "did", "have",
+        "has", "had", "will", "would", "should", "could", "can", "may",
+        "might", "not", "no", "so", "if", "then", "than", "what", "which",
+        "who", "whom", "how", "why", "when", "where", "there", "here",
+        "your", "my", "our", "their",
+    )
+
 
 @dataclass(frozen=True)
 class Paths:
@@ -145,8 +179,23 @@ class FusionConfig:
         })
 
 
+@dataclass(frozen=True)
+class FeedbackConfig:
+    """Thresholds controlling which raw metrics turn into a worded coaching
+    tip (see analyzer/feedback.py). Deliberately reuses the same 0-1
+    normalised "how good is this" score fusion.py already computes from
+    FUSION's good/bad ranges above, rather than introducing a second set of
+    raw thresholds -- so a tip's trigger point can never drift out of sync
+    with what actually moved the fusion score for the same metric.
+    """
+    needs_work_max: float = 0.40   # normalised score at/below this -> a coaching tip is generated
+    praise_min: float = 0.85       # normalised score at/above this -> a positive tip is generated
+    max_tips: int = 5              # cap on how many tips generate_tips() returns at once
+
+
 AUDIO = AudioConfig()
 VIDEO = VideoConfig()
 TEXT = TextConfig()
 PATHS = Paths()
 FUSION = FusionConfig()
+FEEDBACK = FeedbackConfig()

@@ -87,13 +87,14 @@ minor_project/
     video_worker.py           DONE  live pipeline: calibration + camera-facing/pose/blink metrics
     capture.py                  DONE  live capture: webcam/loopback/mic wired into the workers
     dashboard_data.py             DONE  pure formatting/aggregation helpers for app.py
-    text.py                         TODO  hedging, sentiment, answer relevance
+    text.py                       DONE  hedging, sentiment, answer relevance (not live-wired yet)
     fusion.py                     DONE  rule-based engagement/fluency/confidence scoring
-    feedback.py                     TODO  turns scores into coaching tips
+    feedback.py                   DONE  turns scores into coaching tips
   app.py                            DONE  Streamlit live dashboard (interviewer-only)
   run_session.py                   TODO  starts capture + worker processes
-  tests/                    DONE  pytest suite — 14 tests passing, run before every commit
-  evaluation/                TODO  validation, ablation, rater-agreement scripts (Week 7)
+  tests/                    DONE  pytest suite — 161 tests passing, run before every commit
+  evaluation/                DONE* tooling built + tested (statistics/ablation/validation);
+                                    *no real data collected/evaluated yet — see evaluation/README.md
   data/sessions/               each recorded/analysed session gets its own subfolder + events.db
   requirements.txt
   Project_Synopsis.docx        the full written design doc
@@ -191,7 +192,41 @@ minor_project/
   calculation exactly (down to driver-by-driver percentages), proving the whole chain
   — event log → `compute_from_log` → `compute_scores` → dashboard tiles — is wired
   correctly end to end in the actual running app.
-- 95/95 tests passing.
+- **Coaching tip generator** (`analyzer/feedback.py`, Week 6) — turns a `FusionResult`'s
+  raw inputs into 1-5 specific, worded tips (e.g. "Camera-facing time was 20% — try
+  holding your gaze on the lens for 3-5 seconds at a time"), reusing `fusion.py`'s exact
+  `FUSION` thresholds (via a new `FeedbackConfig` block in `config.py`) so a tip can never
+  drift out of sync with the score it explains. Same missing-data rule as `fusion.py`:
+  a metric with no reading yet produces no tip, never a guessed one; an honest "not
+  enough data yet" / "everything's in a comfortable range" info tip is returned instead
+  of an empty list. 26 tests in `tests/test_feedback.py`, golden-value-checked by hand.
+- **Text signals** (`analyzer/text.py`, Week 6) — `hedge_rate` (reuses
+  `audio_features.count_hedges`, so there's one single definition of "what's a hedge
+  phrase" project-wide), lexicon-based `sentiment_score` (exact-token match against
+  `TEXT.positive_words`/`negative_words`, not substring — "strongly" doesn't match
+  "strong"), and `answer_relevance` (Jaccard overlap of non-stopword tokens between a
+  question and an answer). `TextWorker` writes `hedge_rate`/`sentiment`/`answer_relevance`
+  to the event log the same way `AudioWorker`/`VideoWorker` do. `hedge_rate` now actually
+  feeds `fusion.py`'s confidence score — no changes needed there, the weight was already
+  configured and just waiting for something to produce the metric. 24 tests in
+  `tests/test_text.py`.
+  **Known gap:** `answer_relevance` is tested and ready but nothing wires it into a live
+  session yet — it needs the literal question text, and nothing currently captures that
+  (the interviewer asks out loud; `app.py`'s "mark next question" button only marks a
+  timestamp). Needs a UI decision (e.g. a question-text box in `app.py`) before it can run
+  live — see `analyzer/text.py`'s module docstring.
+- **Evaluation tooling** (`evaluation/`, Week 7) — `statistics.py` (Pearson, Spearman,
+  Cohen's kappa — each returns `None`, never a fabricated 0.0/1.0, when the input can't
+  support the statistic), `ablation.py` (leave-one-signal-out impact per metric, reusing
+  `fusion.weighted_average()` directly so it can't drift from the real scoring math), and
+  `validation.py` (rater-agreement check + system-vs-human correlation, with an explicit
+  warning — not a hidden number — when the sample is too small to trust). 27 tests, all
+  against synthetic/textbook example data.
+  **No real evaluation has been run.** That needs actually recording interviews and
+  getting them rated by real people — the tooling is ready, the data collection (Week 7's
+  actual point) has not happened. See `evaluation/README.md` for the full methodology,
+  current status, and how to run it once ratings exist.
+- 161/161 tests passing (up from 95 — see above).
 
 ### Not started yet
 - **Call-window video capture via OBS Virtual Camera.** `capture.py`'s `VideoSource`
@@ -200,13 +235,12 @@ minor_project/
   (see `analyzer/capture.py`'s docstring). **Blocked: OBS Studio is not installed on
   the dev machine yet.** Until it is, `capture.py`/`app.py` have been developed and
   validated against a plain webcam instead. **This is the natural next task.**
-- `analyzer/text.py` — hedging/sentiment/answer-relevance (Week 6 in the plan). Once
-  built, its `hedge_rate` metric plugs straight into `fusion.py`'s confidence score
-  with no changes needed there — the weight is already configured, just currently
-  dropped because nothing produces the metric yet.
-- `analyzer/feedback.py` — turning fusion scores into worded coaching tips (Week 6).
-- `evaluation/` scripts, real dataset collection, validating/recalibrating
-  `fusion.py`'s reference ranges against real human ratings — Week 7.
+- Wiring `analyzer/text.py`'s `TextWorker` into the live pipeline (`capture.py`/`app.py`)
+  the way `AudioWorker`/`VideoWorker` already are, and a question-text input for
+  `answer_relevance` (see "Known gap" above).
+- Real dataset collection + running `evaluation/`'s tooling against it, and
+  validating/recalibrating `fusion.py`'s reference ranges if the data supports it — the
+  actual data-collection part of Week 7 (the tooling itself is built — see above).
 
 ### Known gotchas (read before touching audio/GPU code)
 - **A score built from half its inputs must never look like a complete one — always
@@ -358,10 +392,10 @@ Run the tests to confirm the setup works:
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q
 ```
-You should see `95 passed`. If GPU-related tests are added later and fail, that's a
+You should see `161 passed`. If GPU-related tests are added later and fail, that's a
 hardware/driver issue on your machine specifically — CPU fallback should still work
 (`analyzer/transcribe.py` falls back automatically and logs a warning). None of the
-current 91 tests actually require a GPU, webcam or microphone — they use fake
+current tests actually require a GPU, webcam or microphone — they use fake
 transcriber/VAD/tracker/AppTest objects, so they should pass identically on any machine.
 
 To actually see the live dashboard (needs a webcam and speakers/mic on your machine):
@@ -378,19 +412,21 @@ To actually see the live dashboard (needs a webcam and speakers/mic on your mach
 | 3 | Video worker: gaze, head pose, blinks, calibration | **Done** (`analyzer/video_worker.py`, tested against a real webcam) |
 | 4 | Event log + live Streamlit dashboard | **Done** (`analyzer/events.py`, `analyzer/capture.py`, `app.py` — all tested against real hardware) |
 | 5 | Fusion layer: rule-based scoring | **Done** (`analyzer/fusion.py`, wired live into `app.py`, verified against hand-calculated values) |
-| 6 | Feedback generator + background LLM scoring | Not started |
-| 7 | Data collection + evaluation (validation, rater agreement, ablation) | Not started |
+| 6 | Feedback generator + text signals (hedging/sentiment/relevance) | **Done** (`analyzer/feedback.py`, `analyzer/text.py` — see "Current status"). Background LLM scoring not started; not required, tips are template-based. `text.py` not yet wired into the live pipeline (see its "Known gap"). |
+| 7 | Data collection + evaluation (validation, rater agreement, ablation) | **Tooling done** (`evaluation/`). **Real data collection not started** — see `evaluation/README.md`. |
 | 8 | Polish, demo rehearsal, final report | Not started |
 
-**We're ahead of the week-by-week schedule** — Weeks 2 through 5 are all done. The
-remaining open item from Week 1, call-window video capture, is blocked on installing
-OBS Studio, not on anything technical. The next natural task is Week 6: turning the
-fusion scores into worded coaching tips (`analyzer/feedback.py`), and eventually
-`analyzer/text.py` (hedging/sentiment/answer-relevance) to feed the confidence score's
-already-configured-but-unused `hedge_rate` input.
+**We're ahead of the week-by-week schedule** — Weeks 2 through 6 are done, and Week 7's
+tooling is done (its actual data-collection step is the next real bottleneck, not code).
+The remaining open item from Week 1, call-window video capture, is blocked on installing
+OBS Studio, not on anything technical. Next natural tasks: wire `analyzer/text.py`'s
+`TextWorker` into the live pipeline the way audio/video workers already are, collect a
+handful of real rated sessions and run `evaluation/`'s tooling against them, or start
+Week 8 polish/demo prep.
 
-If behind schedule: drop background LLM scoring first, then the live transcript
-(keep live video + voice-activity metrics; transcribe after the session instead).
+If behind schedule: drop background LLM scoring first (already not needed — tips are
+template-based), then the live transcript (keep live video + voice-activity metrics;
+transcribe after the session instead).
 
 ## 8. Development notes
 
