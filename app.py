@@ -178,6 +178,26 @@ else:
         metric_cols[4].metric("Blinks / min", f"{br:.0f}" if br is not None else "—",
                                delta=metric_delta_label(blink_rate))
 
+        # Silence on the candidate channel for a while is normal at the very
+        # start (calibration, no one's spoken yet) but confusing later on --
+        # found by a real user who spoke and stuttered for real but saw
+        # every audio metric stay empty the whole session, because their
+        # mic was going to the (untranscribed) interviewer channel instead.
+        if elapsed > 15 and not wpm:
+            if session.solo_test_mode:
+                st.warning(
+                    "⚠️ No speech detected yet from your microphone, even though solo "
+                    "test mode is on. Check the right microphone is selected as your "
+                    "system default, and that you're actually speaking near it."
+                )
+            else:
+                st.warning(
+                    "⚠️ No candidate speech detected yet. If you're testing alone "
+                    "without a real call, your voice is going to the microphone "
+                    "channel, which is never transcribed by design — stop this "
+                    "session and restart with **Solo test mode** checked."
+                )
+
         # Fusion scores: computed fresh from the latest readings above and
         # saved back to the log every refresh, so the post-session report
         # can later read a full history of them like any other metric.
@@ -195,6 +215,20 @@ else:
             (fusion_result.engagement, fusion_result.fluency, fusion_result.confidence),
         ):
             col.metric(label, f"{sub.value:.0f}" if sub.value is not None else "—")
+            # Coverage is shown next to EVERY score, always, not just when
+            # low -- a score built from half its normal signals renders as
+            # a plain number that looks exactly as confident as a complete
+            # one unless this is visible. Found by a real user testing with
+            # no candidate audio captured: Confidence showed "67" built
+            # from only 2 of 4 signals, with no visual difference from a
+            # fully-informed score. See analyzer/fusion.py's SubScore
+            # docstring.
+            if sub.value is None:
+                col.caption("no data yet")
+            elif sub.coverage < 0.5:
+                col.caption(f"⚠️ only {sub.coverage * 100:.0f}% of usual signals")
+            else:
+                col.caption(f"{sub.coverage * 100:.0f}% of usual signals")
         with st.expander("How these scores were built"):
             for label, sub in (
                 ("Engagement", fusion_result.engagement),

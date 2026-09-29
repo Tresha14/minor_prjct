@@ -182,14 +182,16 @@ minor_project/
   engagement — checked by sweeping the whole 0–1 range and asserting the score never
   decreases), and a config sanity check that fails loudly if a weight dict in
   `config.py` ever references a metric name that doesn't exist (catches typos that
-  would otherwise silently contribute nothing to a score, forever, with no error). 24
-  tests in `tests/test_fusion.py`. **Verified live, not just unit-tested:** hand-computed
+  would otherwise silently contribute nothing to a score, forever, with no error). 27
+  tests in `tests/test_fusion.py`, including a `coverage` regression test built from
+  the exact readings of a real "confidence looked confident with zero speech data"
+  bug found by a user (see "Known gotchas"). **Verified live, not just unit-tested:** hand-computed
   the expected engagement/fluency/confidence scores from the dashboard's own live
   readings during a browser test, and the displayed scores matched the hand
   calculation exactly (down to driver-by-driver percentages), proving the whole chain
   — event log → `compute_from_log` → `compute_scores` → dashboard tiles — is wired
   correctly end to end in the actual running app.
-- 92/92 tests passing.
+- 95/95 tests passing.
 
 ### Not started yet
 - **Call-window video capture via OBS Virtual Camera.** `capture.py`'s `VideoSource`
@@ -207,6 +209,21 @@ minor_project/
   `fusion.py`'s reference ranges against real human ratings — Week 7.
 
 ### Known gotchas (read before touching audio/GPU code)
+- **A score built from half its inputs must never look like a complete one — always
+  show coverage, not just the number.** A real user testing solo saw Confidence = 67
+  with zero words spoken as far as the system could tell. The number itself was
+  computed correctly (missing inputs are dropped, per `fusion.py`'s design), but a
+  score built from only 2 of its 4 configured signals (camera_facing + blink_rate;
+  pause_rate had no audio, hedge_rate doesn't exist yet) rendered as a plain "67" —
+  visually indistinguishable from a fully-informed score. Fixed by adding
+  `SubScore.coverage` (fraction of configured weight actually present) and showing it
+  next to every score tile in `app.py`, always, not just when it happens to be low —
+  the whole point is that a thin score can never again look complete by accident.
+  Also added an in-session warning banner (`app.py`) that fires if no candidate speech
+  has been detected after 15s, pointing directly at the solo-test-mode checkbox — the
+  same root cause as the gotcha below, but this time surfaced *during* a running
+  session instead of only on the idle screen, since that's when someone would
+  actually notice something's wrong.
 - **Calibration must be visible to whoever's on camera, or it silently ruins the
   session.** `VideoWorker`'s first `calibration_seconds` (~8s) become the "normal"
   baseline that everything else is compared against — but that window used to run with
@@ -341,7 +358,7 @@ Run the tests to confirm the setup works:
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q
 ```
-You should see `92 passed`. If GPU-related tests are added later and fail, that's a
+You should see `95 passed`. If GPU-related tests are added later and fail, that's a
 hardware/driver issue on your machine specifically — CPU fallback should still work
 (`analyzer/transcribe.py` falls back automatically and logs a warning). None of the
 current 91 tests actually require a GPU, webcam or microphone — they use fake
@@ -414,7 +431,7 @@ paste this to Claude:
 >   `mkdir -p analyzer/models && curl -L -o analyzer/models/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`
 > (the face-tracking model isn't committed to git) and
 > `./.venv/Scripts/python.exe -m pytest tests/ -q` to confirm the setup works (expect
-> 92 passed — none of these need a camera, mic or GPU, they all use fakes). If you want
+> 95 passed — none of these need a camera, mic or GPU, they all use fakes). If you want
 > to see the actual dashboard, including the live fusion scores, `./.venv/Scripts/streamlit.exe run app.py`
 > needs a real webcam and speakers/mic. Then help me build `analyzer/feedback.py`
 > (Week 6): turn a `FusionResult` (see `analyzer/fusion.py`) into three to five

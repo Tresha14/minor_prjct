@@ -168,16 +168,32 @@ class SubScore:
     """One sub-score: 0-100, or None if nothing fed it. `drivers` maps
     each metric that *was* available to its normalised (0-1) contribution
     -- this is what makes a score explainable rather than a black box.
+
+    `coverage` is the fraction (0-1) of this score's *configured* weight
+    that actually had data behind it. This exists because of a real,
+    important failure mode found by testing: a score built from half its
+    normal inputs (e.g. only camera_facing and blink_rate, with pause_rate
+    and hedge_rate both missing) renders as a plain number -- 67 -- that
+    looks exactly as confident as a fully-informed score. It isn't. A
+    caller (the dashboard) should always show `coverage` next to `value`,
+    not just when it happens to be low, so a thin score can never be
+    mistaken for a complete one.
     """
     value: float | None
     drivers: dict[str, float]
+    coverage: float  # 0-1; 0.0 when value is None (nothing was present at all)
 
 
 def _sub_score(normalised: dict[str, float | None], weights: dict[str, float]) -> SubScore:
     weighted = {name: (weight, normalised.get(name)) for name, weight in weights.items()}
     avg01, drivers = weighted_average(weighted)
     value = round(avg01 * 100, 1) if avg01 is not None else None
-    return SubScore(value=value, drivers=drivers)
+
+    total_configured_weight = sum(weights.values())
+    present_weight = sum(weight for name, (weight, score) in weighted.items() if score is not None)
+    coverage = (present_weight / total_configured_weight) if total_configured_weight > 0 else 0.0
+
+    return SubScore(value=value, drivers=drivers, coverage=coverage)
 
 
 @dataclass

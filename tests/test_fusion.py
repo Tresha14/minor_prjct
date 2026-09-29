@@ -159,6 +159,44 @@ def test_compute_scores_golden_values_all_inputs_present():
     assert set(result.confidence.drivers) == {"camera_facing", "pause_rate", "blink_rate"}  # no hedge_rate
 
 
+def test_coverage_reflects_configured_weight_present_not_just_whether_value_exists():
+    """The exact scenario a real user hit: only video signals available
+    (camera_facing, blink_rate), no audio at all, hedge_rate not yet
+    produced by any module. confidence.value comes back as a plain number
+    (67ish) that looks just as confident as a fully-informed score unless
+    coverage is checked -- this test locks in that coverage correctly
+    reports "less than half the normal signals were present", so a caller
+    can never mistake this for a complete score.
+
+    confidence: only camera_facing (0.30) and blink_rate (0.15) present
+    out of configured weights {pause_rate .30, camera_facing .30,
+    blink_rate .15, hedge_rate .25} summing to 1.0 -> coverage = 0.45.
+    """
+    inputs = FusionInputs(camera_facing=1.0, blink_rate=0.0)  # exactly the real screenshot's readings
+    result = compute_scores(inputs)
+
+    assert result.confidence.coverage == pytest.approx(0.45)
+    assert result.confidence.value is not None  # a number IS shown...
+    assert result.confidence.coverage < 0.5     # ...but coverage proves it's built from less than half the signal
+
+
+def test_coverage_is_one_when_every_configured_signal_is_present():
+    inputs = FusionInputs(camera_facing=0.9, pose_stability=1.0, wpm=140.0, pause_rate=0.10,
+                           filler_rate=0.5, blink_rate=15.0, hedge_rate=1.0)
+    result = compute_scores(inputs)
+    assert result.engagement.coverage == pytest.approx(1.0)
+    assert result.fluency.coverage == pytest.approx(1.0)
+    assert result.confidence.coverage == pytest.approx(1.0)
+
+
+def test_coverage_is_zero_when_nothing_is_present():
+    result = compute_scores(FusionInputs())
+    assert result.engagement.coverage == 0.0
+    assert result.fluency.coverage == 0.0
+    assert result.confidence.coverage == 0.0
+    assert result.engagement.value is None  # zero coverage must always mean value is None too
+
+
 def test_compute_scores_all_missing_gives_none_not_a_fabricated_default():
     result = compute_scores(FusionInputs())
     assert result.engagement.value is None
