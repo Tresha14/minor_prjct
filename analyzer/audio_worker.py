@@ -57,7 +57,12 @@ class AudioWorker:
                  target_chunk_s: float = AUDIO.target_chunk_s,
                  max_chunk_s: float = AUDIO.max_chunk_s,
                  min_chunk_s: float = AUDIO.min_chunk_s,
-                 min_speech_fraction: float = AUDIO.min_speech_fraction):
+                 min_speech_fraction: float = AUDIO.min_speech_fraction,
+                 text_worker=None):
+        """`text_worker` (optional) needs one method:
+            process_segment(text, word_count, t)
+        (matches analyzer.text.TextWorker). Called once per transcribed
+        segment so hedge_rate/sentiment are written alongside wpm etc."""
         if not (0 < min_chunk_s <= target_chunk_s <= max_chunk_s):
             raise ValueError("expected 0 < min_chunk_s <= target_chunk_s <= max_chunk_s")
         self.log = event_log
@@ -69,6 +74,7 @@ class AudioWorker:
         self.max_chunk_s = max_chunk_s
         self.min_chunk_s = min_chunk_s
         self.min_speech_fraction = min_speech_fraction
+        self.text_worker = text_worker
 
         self._buffer = np.zeros(0, dtype=np.float32)
         self._buffer_start_t = 0.0
@@ -179,6 +185,9 @@ class AudioWorker:
         self.log.metric(self.source, "wpm", stats.wpm, t=segment_end)
         self.log.metric(self.source, "pause_rate", stats.pause_rate, t=segment_end)
         self.log.metric(self.source, "filler_rate", stats.filler_rate, t=segment_end)
+
+        if self.text_worker is not None:
+            self.text_worker.process_segment(" ".join(w.text for w in words), len(words), t=segment_end)
 
         for pause in stats.pauses:
             if pause.is_long:

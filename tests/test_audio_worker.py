@@ -233,3 +233,34 @@ def test_invalid_chunk_bounds_raise():
     with pytest.raises(ValueError):
         AudioWorker(event_log=None, transcriber=None, vad=None,
                     min_chunk_s=10.0, target_chunk_s=5.0)  # min > target
+
+
+class RecordingTextWorker:
+    def __init__(self):
+        self.calls = []
+
+    def process_segment(self, text, word_count, t):
+        self.calls.append((text, word_count, t))
+
+
+def test_text_worker_receives_each_transcribed_segment(tmp_path):
+    words = [Word("maybe", 0.5, 0.9), Word("I", 1.0, 1.1), Word("guess", 1.2, 1.6)]
+    log = make_log(tmp_path)
+    tw = RecordingTextWorker()
+    worker = AudioWorker(log, FakeTranscriber(words), FakeVAD(), sample_rate=SR,
+                         target_chunk_s=8.0, max_chunk_s=20.0, min_chunk_s=2.0, text_worker=tw)
+    push_in_pieces(worker, synth_audio([(0.5, 1.6)], total_seconds=3.0))
+    worker.flush()
+    assert len(tw.calls) == 1
+    text, count, _t = tw.calls[0]
+    assert text == "maybe I guess" and count == 3
+
+
+def test_no_text_worker_is_still_fine(tmp_path):
+    words = [Word("hi", 0.5, 0.9)]
+    log = make_log(tmp_path)
+    worker = AudioWorker(log, FakeTranscriber(words), FakeVAD(), sample_rate=SR,
+                         target_chunk_s=8.0, max_chunk_s=20.0, min_chunk_s=2.0)
+    push_in_pieces(worker, synth_audio([(0.5, 0.9)], total_seconds=3.0))
+    worker.flush()
+    assert log.recent_metrics("wpm")   # normal path unaffected

@@ -64,6 +64,11 @@ def format_event(row: tuple) -> str:
     elif kind == "gaze_away" and isinstance(detail.get("camera_facing_fraction"), (int, float)):
         extra = f" ({detail['camera_facing_fraction'] * 100:.0f}% facing camera)"
 
+    elif kind == "question_marker":
+        qid, qtext = detail.get("question_id"), detail.get("text")
+        if isinstance(qid, int):
+            extra = f" (Q{qid}" + (f": {qtext}" if qtext else "") + ")"
+
     return f"[{ts}] {label}{extra}"
 
 
@@ -87,3 +92,13 @@ def metric_delta_label(rows: list[tuple[float, float]]) -> str | None:
         return None
     sign = "+" if diff > 0 else ""
     return f"{sign}{diff:.1f}"
+
+
+TIP_ICONS = {"needs_work": "🔸", "praise": "✅", "info": "ℹ️"}
+
+
+def format_tip(tip) -> str:
+    """One markdown line for a feedback.Tip: an icon for its severity plus
+    its text. Unknown severities fall back to the info icon rather than
+    raising -- a display helper shouldn't be able to crash the dashboard."""
+    return f"{TIP_ICONS.get(tip.severity, TIP_ICONS['info'])} {tip.text}"

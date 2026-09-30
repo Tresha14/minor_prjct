@@ -82,12 +82,12 @@ def test_sentiment_score_empty_text():
 def test_answer_relevance_golden_value():
     # question significant words: {greatest, strength, leader}
     # answer significant words:   {greatest, strength, leader, communication}
-    # union=4, intersection=3 -> 0.75
+    # all three question keywords appear in the answer -> 3/3
     result = answer_relevance(
         "What is your greatest strength as a leader?",
         "My greatest strength as a leader is communication.",
     )
-    assert result.score == pytest.approx(0.75)
+    assert result.score == pytest.approx(1.0)
     assert result.matched_words == {"greatest", "strength", "leader"}
 
 
@@ -126,6 +126,39 @@ def test_answer_relevance_ignores_case_and_punctuation():
     assert "strength" in a.matched_words
 
 
+def test_answer_relevance_partial_coverage_golden_value():
+    # question keywords {describe, experience, databases}; answer covers 1 of 3
+    result = answer_relevance("Describe your experience with databases",
+                              "I have worked on databases for years and I know the domain well")
+    assert result.score == pytest.approx(1 / 3)
+    assert result.matched_words == {"databases"}
+
+
+def test_answer_relevance_is_not_diluted_by_a_long_on_topic_answer():
+    """The regression that motivated replacing Jaccard: same question
+    keywords, answer padded out to ~150 words -- the score must not fall."""
+    question = "Describe your leadership experience"
+    short = "My leadership experience is that I describe goals clearly."
+    padding = " ".join(["and then we shipped the project on schedule"] * 20)
+    assert answer_relevance(question, short).score == pytest.approx(1.0)
+    assert answer_relevance(question, short + " " + padding).score == pytest.approx(1.0)
+
+
+def test_answer_relevance_long_off_topic_answer_stays_zero():
+    padding = " ".join(["I really enjoy hiking with friends on weekends"] * 20)
+    assert answer_relevance("Describe your leadership experience", padding).score == 0.0
+
+
+def test_answer_relevance_matches_simple_inflections():
+    assert answer_relevance("How do you manage databases?", "I was managing a database.").score == pytest.approx(1.0)
+    r = answer_relevance("Describe the projects", "One project stood out.")
+    assert r.matched_words == {"projects"}
+
+
+def test_answer_relevance_stemming_does_not_merge_unrelated_short_words():
+    assert answer_relevance("Tell me about the bus", "I fixed a bug").score == 0.0
+
+
 # ---------------------------------------------------------------- TextWorker (integration)
 
 def test_text_worker_process_segment_writes_hedge_rate_and_sentiment(tmp_path):
@@ -162,9 +195,9 @@ def test_text_worker_score_answer_relevance_writes_metric_and_returns_result(tmp
     )
 
     assert isinstance(result, RelevanceResult)
-    assert result.score == pytest.approx(0.75)
+    assert result.score == pytest.approx(1.0)
     rows = log.recent_metrics("answer_relevance")
-    assert rows == [(30.0, pytest.approx(0.75))]
+    assert rows == [(30.0, pytest.approx(1.0))]
 
 
 def test_text_worker_writes_under_the_text_source_by_default(tmp_path):

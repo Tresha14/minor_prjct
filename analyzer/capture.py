@@ -44,6 +44,8 @@ import numpy as np
 from analyzer.audio_worker import AudioWorker
 from analyzer.config import AUDIO, VIDEO
 from analyzer.events import EventLog
+from analyzer.questions import score_answer_relevance
+from analyzer.text import TextWorker
 from analyzer.vad import VoiceActivityDetector
 from analyzer.video_worker import VideoWorker
 
@@ -255,8 +257,9 @@ class SessionCapture:
         self.log = EventLog(session_dir)
         self.solo_test_mode = solo_test_mode
         self.video_worker = VideoWorker(self.log, face_tracker, source="video")
+        self.text_worker = TextWorker(self.log)
         self.candidate_worker = AudioWorker(self.log, transcriber, VoiceActivityDetector(),
-                                             source="audio_candidate")
+                                             source="audio_candidate", text_worker=self.text_worker)
         self.interviewer_monitor = InterviewerMonitor(self.log, VoiceActivityDetector())
 
         # target_fps matters beyond just analysis granularity: running
@@ -302,6 +305,8 @@ class SessionCapture:
         t_end = time.time() - self._t0 if self._t0 else 0.0
         self.video_worker.finish(t_end)
         self.candidate_worker.flush()
+        scored = score_answer_relevance(self.log, self.text_worker, t_end)
+        logger.info("Scored answer relevance for %d question(s)", scored)
         logger.info("SessionCapture stopped at t=%.1fs", t_end)
 
     def __enter__(self):

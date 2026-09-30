@@ -22,17 +22,11 @@ Hedge detection itself reuses analyzer.audio_features.count_hedges (same
 TEXT.hedge_words lexicon) rather than re-implementing it, so there is one
 single definition of "what counts as a hedge phrase" in the whole project.
 
-KNOWN GAP -- read before wiring answer_relevance() into a live session:
-answer_relevance() needs the literal text of the question being answered,
-but nothing currently captures that. app.py's "mark next question" button
-(see analyzer/dashboard_data.py's EVENT_LABELS["question_marker"]) only
-marks a *timestamp*, not the question's wording -- the interviewer asks
-questions out loud, nothing transcribes or records their side today.
-answer_relevance() below is a tested, ready-to-use pure function, but
-using it live needs a way for the interviewer to enter question text
-(e.g. a text box in app.py) -- a UI decision intentionally left out of
-this module so as not to touch app.py without checking who else might be
-mid-edit on it tonight.
+Answer relevance needs the literal text of the question, which the
+interviewer types into app.py's question box when pressing "Mark next
+question" (see analyzer/questions.py, which splits the transcript into
+per-question answers and calls TextWorker.score_answer_relevance()).
+Questions marked without wording simply get no relevance score.
 """
 from __future__ import annotations
 
@@ -90,13 +84,23 @@ def sentiment_score(text: str) -> SentimentResult:
 
 @dataclass
 class RelevanceResult:
-    """`score`: Jaccard similarity (0-1) between the question's and the
-    answer's significant (non-stopword) words -- 1.0 means every
-    significant word in either side also appears in the other, 0.0 means
-    no overlap at all. `matched_words` is kept for the same reason
-    SubScore.drivers is: a caller (or a human sanity-checking the metric)
-    can see exactly *which* words drove the number instead of trusting a
-    black box."""
+    """`score`: the fraction (0-1) of the question's significant
+    (non-stopword) words that also appear in the answer -- 1.0 means the
+    answer touches every key word of the question, 0.0 means none.
+    `matched_words` is kept for the same reason SubScore.drivers is: a
+    caller (or a human sanity-checking the metric) can see exactly *which*
+    words drove the number instead of trusting a black box.
+
+    This deliberately measures *coverage of the question*, not similarity
+    between the two texts. The first version used Jaccard overlap (shared /
+    all distinct words in either text), which shrinks as the answer gets
+    longer -- a 3-keyword question against a 150-word answer scored ~0.02
+    even when the answer was completely on topic, so it couldn't tell good
+    answers from bad. Coverage doesn't have that problem. Its limit, stated
+    honestly: it's topical keyword coverage, so an answer that merely
+    repeats the question's words would score high; it says nothing about
+    the answer's quality or structure.
+    """
     score: float
     matched_words: frozenset[str]
     question_words: frozenset[str]
@@ -108,21 +112,36 @@ def _significant_words(text: str) -> frozenset[str]:
     return frozenset(t for t in _tokenize(text) if t not in stop)
 
 
-def answer_relevance(question: str, answer: str) -> RelevanceResult:
-    """Jaccard overlap of the two sides' significant words. See this
-    module's docstring ("KNOWN GAP") for why nothing calls this live yet.
+def _stem(word: str) -> str:
+    """Very light suffix stripping so "database"/"databases" and
+    "manage"/"managing"/"managed" compare equal. Not a real stemmer (no
+    Porter/NLTK dependency on purpose) -- just enough to stop trivial
+    inflection from hiding an obviously on-topic answer."""
+    for suffix in ("ing", "ed", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            word = word[:-len(suffix)]
+            break
+    if word.endswith("e") and len(word) > 4:
+        word = word[:-1]
+    return word
 
-    Returns score=0.0 (not None) when either side has no significant words
-    at all -- e.g. an answer of just "um, yeah" has no signal to compare,
-    which is a real (if unhelpful) answer, not a missing metric the way a
-    session with no speech yet is; None is reserved in this project for
-    "hasn't been observed", not "was observed and turned out empty".
+
+def answer_relevance(question: str, answer: str) -> RelevanceResult:
+    """Fraction of the question's significant words found in the answer
+    (after light stemming). See RelevanceResult for why this replaced
+    Jaccard overlap.
+
+    Returns score=0.0 (not None) when the question has no significant words
+    or the answer is empty -- a real (if unhelpful) answer, not a missing
+    metric the way a session with no speech yet is; None is reserved in
+    this project for "hasn't been observed", not "was observed and turned
+    out empty".
     """
     q_words = _significant_words(question)
     a_words = _significant_words(answer)
-    union = q_words | a_words
-    matched = q_words & a_words
-    score = (len(matched) / len(union)) if union else 0.0
+    answer_stems = {_stem(w) for w in a_words}
+    matched = frozenset(w for w in q_words if _stem(w) in answer_stems)
+    score = (len(matched) / len(q_words)) if q_words else 0.0
     return RelevanceResult(score=score, matched_words=matched, question_words=q_words, answer_words=a_words)
 
 
@@ -154,8 +173,8 @@ class TextWorker:
         self.log.metric(self.source, "sentiment", sentiment.score, t=t)
 
     def score_answer_relevance(self, question: str, answer: str, t: float) -> RelevanceResult:
-        """Call once question text is available (see this module's
-        docstring -- nothing currently supplies that live). Writes
+        """Call once question text is available (analyzer/questions.py does
+        this at the end of a session). Writes
         "answer_relevance" to the log and also returns the full
         RelevanceResult so a caller can show the matched words without a
         second read of the log."""

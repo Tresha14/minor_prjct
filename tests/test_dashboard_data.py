@@ -88,3 +88,23 @@ def test_metric_delta_label():
     assert metric_delta_label([(1.0, 100.0)]) is None
     assert metric_delta_label([]) is None
     assert metric_delta_label([(1.0, 100.0), (2.0, 100.0)]) is None  # no change
+
+
+def test_format_event_shows_question_number_and_text():
+    row = (75.0, None, "session", "question_marker", json.dumps({"question_id": 3, "text": "Why us?"}))
+    assert format_event(row) == "[01:15] New question marked (Q3: Why us?)"
+
+
+def test_format_event_question_marker_without_text_or_detail():
+    assert format_event((5.0, None, "session", "question_marker", "{}")) == "[00:05] New question marked"
+    row = (5.0, None, "session", "question_marker", json.dumps({"question_id": 2, "text": ""}))
+    assert format_event(row) == "[00:05] New question marked (Q2)"
+
+
+def test_format_tip_uses_severity_icon():
+    from analyzer.dashboard_data import format_tip
+    from analyzer.feedback import Tip
+    assert format_tip(Tip(metric="wpm", severity="needs_work", text="Slow down.")) == "🔸 Slow down."
+    assert format_tip(Tip(metric="wpm", severity="praise", text="Nice pace.")) == "✅ Nice pace."
+    assert format_tip(Tip(metric=None, severity="info", text="Not enough data yet.")).startswith("ℹ️ ")
+    assert format_tip(Tip(metric=None, severity="weird", text="x")) == "ℹ️ x"
