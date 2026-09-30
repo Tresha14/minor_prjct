@@ -110,3 +110,57 @@ def test_looks_like_question():
     assert not looks_like_question("Great, thanks for that answer.")
     assert not looks_like_question("What I did was refactor the code")  # candidate-style, no '?'
     assert not looks_like_question("Okay?")  # too short to be a real question
+
+
+# --- the "Hello? Hello? how are you?" false positive, and what gets stored -------------
+from analyzer.questions import extract_question_text
+
+
+def test_a_sound_check_greeting_is_not_a_question():
+    # verbatim from a real session, where it was wrongly marked as Question 1
+    assert extract_question_text("Hello? Hello? Ah, so, ah, how are you? Ah,") is None
+
+
+def test_call_chatter_and_small_talk_are_not_questions():
+    assert extract_question_text("Can you hear me?") is None
+    assert extract_question_text("Hi, how are you doing today?") is None
+    assert extract_question_text("Is my audio okay on your side?") is None
+    assert extract_question_text("Nice to meet you, how's it going?") is None
+
+
+def test_only_the_question_sentence_is_kept_after_small_talk():
+    assert extract_question_text("Hello? Hello? How are you? Tell me about your last job.") == \
+        "Tell me about your last job."
+    assert extract_question_text("Okay, thanks. Why did you leave your last job?") == \
+        "Why did you leave your last job?"
+
+
+def test_fillers_and_repeats_do_not_pad_a_short_utterance_into_a_question():
+    assert extract_question_text("Um, uh, so, well, okay, right?") is None
+    assert extract_question_text("Maybe maybe maybe maybe?") is None   # one distinct word, repeated
+
+
+def test_real_interview_questions_still_pass():
+    for q in ("Tell me about yourself?", "What is your biggest strength?",
+              "Describe a time you led a team", "Can you explain your approach in more detail?"):
+        assert extract_question_text(q) == q
+
+
+def test_a_greeting_turn_is_logged_but_not_marked_as_a_question(tmp_path):
+    log, det = _detector(tmp_path, FakeTranscriber("Hello? Hello? Ah, so, ah, how are you?"))
+    _feed(det, [(3.0, 2.0)])
+    assert read_markers(log.recent_events()) == []
+    turns = [e for e in log.recent_events() if e[3] == "interviewer_turn"]
+    assert len(turns) == 1 and "how are you" in turns[0][4]      # shown in the live panel, not scored
+
+
+def test_marker_wording_is_just_the_question_not_the_chatter_around_it(tmp_path):
+    log, det = _detector(tmp_path, FakeTranscriber("Hello. Thanks for joining. Tell me about your last job?"))
+    _feed(det, [(4.0, 2.0)])
+    assert [m.text for m in read_markers(log.recent_events())] == ["Tell me about your last job?"]
+
+
+def test_interviewer_turns_never_appear_in_the_candidates_transcript(tmp_path):
+    log, det = _detector(tmp_path, FakeTranscriber("Why do you want this job?"))
+    _feed(det, [(3.0, 2.0)])
+    assert log.all_transcript() == []

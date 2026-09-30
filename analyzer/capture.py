@@ -135,6 +135,8 @@ class AudioSource:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self.error: str | None = None  # set if the device stops working mid-session
+        self.level = 0.0               # recent loudness (RMS, 0-1) with a short peak hold, for the live indicator
+        self.last_chunk_time: float | None = None  # wall-clock time audio last arrived
 
     def start(self, on_chunk, t0: float) -> None:
         numframes = int(self.chunk_seconds * self.sample_rate)
@@ -148,7 +150,11 @@ class AudioSource:
                     while not self._stop.is_set():
                         raw = rec.record(numframes=numframes)
                         t = time.time() - t0
-                        on_chunk(to_mono_float32(raw), t)
+                        mono = to_mono_float32(raw)
+                        rms = float(np.sqrt(np.mean(np.square(mono)))) if len(mono) else 0.0
+                        self.level = max(rms, self.level * 0.85)  # quick rise, slow fall
+                        self.last_chunk_time = time.time()
+                        on_chunk(mono, t)
             except Exception as exc:  # noqa: BLE001 - any device failure should be surfaced, not swallowed
                 logger.exception("AudioSource(%s) stopped", self.device)
                 self.error = f"{type(exc).__name__}: {exc}"
@@ -335,6 +341,11 @@ class SessionCapture:
                 self.interviewer_source.start(self.interviewer_monitor.push_audio, self._t0)
         logger.info("SessionCapture started (solo_test_mode=%s), writing to %s",
                     self.solo_test_mode, self.log.db_path)
+
+    def video_problems(self) -> list[str]:
+        """Why the video source stopped (e.g. the captured window was closed), empty if fine."""
+        err = getattr(self.video_source, "error", None)
+        return [f"Video capture stopped: {err}"] if err else []
 
     def audio_problems(self) -> list[str]:
         """Human-readable reasons an audio channel stopped, empty if all is well."""

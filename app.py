@@ -38,7 +38,7 @@ from analyzer.capture import SessionCapture
 from analyzer.config import PATHS
 from analyzer.dashboard_data import (
     FLAGGED_EVENT_KINDS, format_seconds, format_tip, latest_value, metric_delta_label, summarize_events,
-    window_average,
+    window_average, channel_status, interviewer_turns,
 )
 from analyzer.feedback import generate_tips_from_log
 from analyzer.fusion import compute_from_log, write_scores
@@ -46,11 +46,22 @@ from analyzer.questions import mark_question as write_question_marker
 
 st.set_page_config(page_title="Interview Coach — Live View", layout="wide")
 
+
+def stop_preview() -> None:
+    """Stops the live window preview if one is running. Called whenever it could
+    otherwise be left capturing in the background (session start, other mode)."""
+    entry = st.session_state.get("preview")
+    if entry is not None:
+        entry["preview"].stop()
+    st.session_state.preview = None
+
+
 # Two modes in one app: the live interviewer view (below) and a review page
 # for saved sessions. The review branch stops the script so none of the live
 # machinery (session state, camera, model) is touched while reviewing.
 page_mode = st.sidebar.radio("Mode", ["Live session", "Review saved session"], key="page_mode")
 if page_mode == "Review saved session":
+    stop_preview()
     import review_page
     review_page.render()
     st.stop()
@@ -60,24 +71,133 @@ CAMERA_MODE = "Camera (webcam or OBS Virtual Camera)"
 WINDOW_MODE = "Capture a window (no OBS needed)"
 
 
+def sync_preview(want: bool) -> None:
+    """Keeps exactly the right preview running: one for the selected window and
+    method if `want`, otherwise none. Restarts it if the window or method changed
+    or it stopped by itself."""
+    from analyzer.config import VIDEO
+    from analyzer.window_capture import LivePreview, make_window_source
+
+    key = (st.session_state.get("window_hwnd"), current_method())
+    entry = st.session_state.get("preview")
+    if not want or key[0] is None:
+        stop_preview()
+        return
+    if entry is not None and entry["key"] == key and entry["preview"].running:
+        return
+    stop_preview()
+    try:
+        source, note = make_window_source(key[0], key[1], 5.0, (0.0, 0.0, 0.0, 0.0))
+        preview = LivePreview(source)
+        preview.start()
+        st.session_state.preview = {"key": key, "preview": preview, "note": note}
+    except Exception as exc:  # noqa: BLE001 - the picker must keep working if capture fails
+        st.session_state.preview = None
+        st.error(f"Couldn't start the live preview: {exc}")
+
+
+def render_audio_channels(session, log, elapsed: float) -> None:
+    """Shows, for each audio channel, whether sound is arriving and what was
+    understood from it -- so "my speech isn't detected" can be told apart from
+    "it was heard but goes to the interviewer channel, which isn't transcribed
+    into the candidate's transcript" and from "no audio is arriving at all"."""
+    now = time.time()
+    solo = session.solo_test_mode
+    detector = getattr(session, "question_detector", None)
+    st.subheader("Audio channels")
+    left, right = st.columns(2)
+
+    with left:
+        if solo:
+            st.markdown("**🎙 Interviewer mic**")
+            st.caption("Not used in solo test mode: your own mic is the *candidate* channel (right).")
+        else:
+            src = getattr(session, "interviewer_source", None)
+            label, frac = channel_status(getattr(src, "level", None), getattr(src, "last_chunk_time", None), now)
+            st.markdown(f"**🎙 You (interviewer mic)** — {label}")
+            st.progress(frac)
+            turns = interviewer_turns(log.recent_events(limit=400))
+            if turns:
+                st.caption(f'You said: "{turns[0]}"')
+            elif detector is None:
+                st.caption("Your speech is measured here but not transcribed "
+                           "(automatic question detection is off).")
+            else:
+                st.caption("Nothing understood from you yet.")
+            if detector is not None:
+                st.caption(f"Questions detected: {detector.questions_marked}. "
+                           "Your speech is used for this only; it is never added to the candidate's transcript.")
+
+    with right:
+        src = getattr(session, "candidate_source", None)
+        label, frac = channel_status(getattr(src, "level", None), getattr(src, "last_chunk_time", None), now)
+        title = "🗣 Candidate (your own mic, solo test mode)" if solo else "🗣 Candidate (call audio from your speakers)"
+        st.markdown(f"**{title}** — {label}")
+        st.progress(frac)
+        words = [w[2] for w in log.all_transcript()]
+        if words:
+            st.caption("Heard: “… " + " ".join(words[-14:]) + "”")
+        else:
+            st.caption("Nothing transcribed yet (it appears a few seconds after they speak).")
+        if not solo and elapsed > 15 and frac == 0.0 and not words:
+            st.caption("🔎 Nothing is playing through your default output device. Check that the call's "
+                       "sound comes out of the same speakers/headphones Windows has as the default.")
+
+
+@st.fragment(run_every=0.6)
+def live_preview_view() -> None:
+    """Shows the newest captured frame with the trim applied, plus whether the
+    face tracker can find a face in it -- i.e. exactly what would be analysed."""
+    from analyzer.window_capture import crop_frame
+
+    entry = st.session_state.get("preview")
+    if entry is None:
+        return
+    preview = entry["preview"]
+    if entry.get("note"):
+        st.info(entry["note"])
+    if preview.error:
+        st.error(f"Capture stopped: {preview.error}")
+        return
+    if not preview.running:
+        st.caption("Preview paused (no one was looking). Toggle **Live preview** off and on to restart it.")
+        return
+    frame = preview.latest()
+    if frame is None:
+        st.caption("Waiting for the first frame...")
+        return
+    cropped = crop_frame(frame, current_crop())
+    st.image(cropped[:, :, ::-1], use_container_width=True)
+    found = preview.face_found(cropped)
+    if found is True:
+        st.success(f"Face found -- this is what will be analysed. (live, ~{preview.fps:.0f} fps)")
+    elif found is False:
+        st.warning("No face found in this view yet. Trim the sides until the candidate's face fills "
+                   "the picture (and pick their video tile, not your own), or make their video bigger.")
+    else:
+        st.caption(f"Live (~{preview.fps:.0f} fps). Face check unavailable.")
+
+
 def current_crop() -> tuple[float, float, float, float]:
     """Edge trim from the sliders, as 0-1 fractions: (left, top, right, bottom)."""
     return tuple(st.session_state.get(k, 0) / 100 for k in ("crop_left", "crop_top", "crop_right", "crop_bottom"))
 
 
+DIRECT_METHOD = "Direct capture (recommended)"
 SCREEN_METHOD = "Screen copy (window must stay uncovered)"
-OFFSCREEN_METHOD = "Off-screen (works if covered, but may miss video)"
+OFFSCREEN_METHOD = "Off-screen (may miss video)"
 
 
 def current_method() -> str:
-    return "offscreen" if st.session_state.get("capture_method") == OFFSCREEN_METHOD else "screen"
+    chosen = st.session_state.get("capture_method")
+    return {SCREEN_METHOD: "screen", OFFSCREEN_METHOD: "offscreen"}.get(chosen, "direct")
 
 
 def render_window_picker() -> None:
     """Window dropdown, edge-trim sliders and a one-shot preview. The trim is
     there because the face tracker needs the face to be big: with a whole
     Meet/Zoom window captured, a small video tile reads as 'no face'."""
-    from analyzer.window_capture import crop_frame, grab_window, list_windows
+    from analyzer.window_capture import list_windows
 
     windows = list_windows()
     titles = dict(windows)
@@ -88,24 +208,24 @@ def render_window_picker() -> None:
         help="Works even if another window is on top of it, but not if it's minimised.",
     )
     st.radio(
-        "Capture method", [SCREEN_METHOD, OFFSCREEN_METHOD], key="capture_method", horizontal=True,
-        help=("Screen copy records what is actually displayed, so browser video calls (Meet, Zoom in "
-              "Chrome) show up, but if another window covers the call window it records that "
-              "instead -- arrange your windows side by side. Off-screen works even when covered, but "
-              "GPU-drawn video (often the call video itself) can come out black."),
+        "Capture method", [DIRECT_METHOD, SCREEN_METHOD, OFFSCREEN_METHOD], key="capture_method",
+        horizontal=True,
+        help=("Direct capture uses Windows' own window-capture: it works even if the call window is "
+              "covered or behind other windows, and it sees video. If it can't run on this PC the app "
+              "switches to screen copy and tells you. Screen copy records what is displayed, so the "
+              "call window must stay fully visible. Off-screen can come out black where the call "
+              "video is drawn by the GPU."),
     )
     cols = st.columns(4)
     for col, label, key in zip(cols, ("Trim left %", "Trim top %", "Trim right %", "Trim bottom %"),
                                ("crop_left", "crop_top", "crop_right", "crop_bottom")):
         col.slider(label, 0, 60, 0, key=key)
-    if st.button("Preview what will be analysed", disabled=not st.session_state.get("window_hwnd")):
-        frame = grab_window(st.session_state.window_hwnd, current_method())
-        if frame is None:
-            st.error("Couldn't capture that window (closed or minimised?).")
-        else:
-            st.image(crop_frame(frame, current_crop())[:, :, ::-1],
-                     caption="Trim until the candidate's face fills most of this picture, "
-                             "and only one face is visible.")
+    st.toggle("Live preview (shows what will be analysed)", value=True, key="live_preview",
+              help="A live view of the chosen window with your trim applied, and whether a face is "
+                   "found in it. It stops by itself when you start a session.")
+    sync_preview(st.session_state.get("live_preview", True))
+    if st.session_state.get("preview") is not None:
+        live_preview_view()
 
 
 @st.cache_resource(show_spinner="Loading the speech model (first run downloads a few hundred MB)...")
@@ -117,27 +237,40 @@ def get_transcriber():
 def start_session() -> None:
     from analyzer.video import FaceTracker  # imported lazily so the page loads fast before this is needed
 
+    stop_preview()  # the session opens its own capture; don't run two
+
     transcriber = get_transcriber()
     tracker = FaceTracker()
     session_dir = Path(PATHS.data_dir) / time.strftime("%Y%m%d_%H%M%S")
     video_source = None
     if st.session_state.get("video_mode") == WINDOW_MODE:
         from analyzer.config import VIDEO
-        from analyzer.window_capture import WindowSource
+        from analyzer.window_capture import make_window_source
         hwnd = st.session_state.get("window_hwnd")
         if not hwnd:
             tracker.close()
             st.session_state.start_error = "Pick a window to capture first."
             return
-        video_source = WindowSource(hwnd, target_fps=VIDEO.target_fps, crop=current_crop(),
-                                    method=current_method())
+        video_source, note = make_window_source(hwnd, current_method(), VIDEO.target_fps, current_crop())
+        st.session_state.capture_note = note
+    else:
+        st.session_state.capture_note = None
     st.session_state.start_error = None
     session = SessionCapture(session_dir, transcriber, tracker,
                               camera_index=int(st.session_state.get("camera_index", 0)),
                               solo_test_mode=st.session_state.get("solo_test_mode", False),
                               video_source=video_source,
                               auto_questions=st.session_state.get("auto_questions", True))
-    session.start()
+    try:
+        session.start()
+    except Exception as exc:  # noqa: BLE001 - don't leave half-started capture threads behind
+        try:
+            session.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        tracker.close()
+        st.session_state.start_error = f"Couldn't start the session: {type(exc).__name__}: {exc}"
+        return
 
     st.session_state.session = session
     st.session_state.face_tracker = tracker
@@ -207,6 +340,7 @@ if session is None:
     if st.session_state.get("video_mode") == WINDOW_MODE:
         render_window_picker()
     else:
+        stop_preview()
         st.number_input(
             "Camera index", min_value=0, max_value=9, value=0, step=1, key="camera_index",
             help="0 is usually the built-in webcam; an OBS Virtual Camera is usually 1.",
@@ -259,6 +393,10 @@ else:
         # instead of the camera, completely ordinary posture afterward
         # reads as "looking away". This banner is the fix -- it tells
         # whoever is on camera exactly when to look at the lens.
+        if st.session_state.get("capture_note"):
+            st.info(st.session_state.capture_note)
+        for problem in session.video_problems():
+            st.error(f"🎥 {problem}. Stop the session and pick the window again.")
         for problem in session.audio_problems():
             st.error(
                 f"🔇 {problem}. Another app (often Zoom/Meet) may be holding that device, or Windows' "
@@ -274,6 +412,8 @@ else:
                 f"this window becomes the \"normal\" baseline for the rest of the session."
             )
             st.progress(1 - (remaining / session.video_worker.calibration_seconds))
+
+        render_audio_channels(session, log, elapsed)
 
         camera_facing = log.recent_metrics("camera_facing")
         pose_stability = log.recent_metrics("pose_stability")

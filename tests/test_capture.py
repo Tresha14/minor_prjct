@@ -126,3 +126,22 @@ def test_audio_source_records_why_it_stopped_instead_of_dying_silently():
     src.start(lambda chunk, t: None, time.time())
     src._thread.join(timeout=2)
     assert src.error is not None and "0x8889000a" in src.error
+
+
+def test_audio_source_tracks_a_live_input_level_for_the_indicator():
+    class Rec:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def record(self, numframes):
+            time.sleep(0.01)
+            return np.full((numframes, 1), 0.2, dtype=np.float32)   # constant 0.2 -> RMS 0.2
+
+    class Dev:
+        def recorder(self, samplerate): return Rec()
+
+    src = AudioSource(Dev(), chunk_seconds=0.05)
+    src.start(lambda chunk, t: None, time.time())
+    time.sleep(0.3)
+    src.stop()
+    assert abs(src.level - 0.2) < 0.01
+    assert src.last_chunk_time is not None and time.time() - src.last_chunk_time < 2

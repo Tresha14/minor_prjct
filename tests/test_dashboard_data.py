@@ -118,3 +118,40 @@ def test_format_tip_uses_severity_icon():
     assert format_tip(Tip(metric="wpm", severity="praise", text="Nice pace.")) == "✅ Nice pace."
     assert format_tip(Tip(metric=None, severity="info", text="Not enough data yet.")).startswith("ℹ️ ")
     assert format_tip(Tip(metric=None, severity="weird", text="x")) == "ℹ️ x"
+
+
+# --- audio channel indicator helpers ------------------------------------------------
+import json as _json
+
+from analyzer.dashboard_data import channel_status, format_event, interviewer_turns
+
+
+def test_channel_status_no_audio_arriving_is_a_problem_not_silence():
+    assert "no audio arriving" in channel_status(0.0, None, now=100.0)[0]       # never got a chunk
+    assert "no audio arriving" in channel_status(0.3, 90.0, now=100.0)[0]       # chunks stopped 10 s ago
+
+
+def test_channel_status_levels():
+    now = 100.0
+    assert "silent" in channel_status(0.0, now, now)[0]
+    assert "very quiet" in channel_status(0.002, now, now)[0]
+    assert "hearing sound" in channel_status(0.05, now, now)[0]
+    quiet, loud = channel_status(0.002, now, now)[1], channel_status(0.2, now, now)[1]
+    assert 0.0 <= quiet < loud <= 1.0
+
+
+def test_interviewer_turns_returns_newest_first_and_skips_bad_rows():
+    rows = [  # newest first, like EventLog.recent_events()
+        (30.0, 33.0, "audio_interviewer", "interviewer_turn", _json.dumps({"text": "third"})),
+        (25.0, 26.0, "video", "gaze_away", None),
+        (20.0, 23.0, "audio_interviewer", "interviewer_turn", "not json"),
+        (10.0, 13.0, "audio_interviewer", "interviewer_turn", _json.dumps({"text": "first"})),
+    ]
+    assert interviewer_turns(rows, limit=5) == ["third", "first"]
+    assert interviewer_turns(rows, limit=1) == ["third"]
+    assert interviewer_turns([]) == []
+
+
+def test_interviewer_turn_event_is_formatted_with_what_was_said():
+    row = (14.0, 17.0, "audio_interviewer", "interviewer_turn", _json.dumps({"text": "Hello there"}))
+    assert format_event(row) == '[00:14] Interviewer spoke: "Hello there"'

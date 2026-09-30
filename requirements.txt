@@ -15,6 +15,10 @@ scikit-learn==1.9.1
 opencv-python==5.0.0.93
 mediapipe==1.0.1
 
+# Captures a call window directly (Windows Graphics Capture) so OBS isn't needed.
+# Only its numpy/opencv dependencies, which are already pinned above.
+windows-capture==2.0.1; sys_platform == "win32"
+
 # Speech (streaming transcription + voice activity)
 faster-whisper==1.2.1
 silero-vad==6.2.3

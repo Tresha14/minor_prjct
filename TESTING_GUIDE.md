@@ -63,13 +63,20 @@ interviewer's own channel entirely. Leave it unchecked for a real two-person run
 Use this when the candidate is on another laptop, in a Zoom/Meet/Teams call on yours.
 1. Join the call on your laptop; put the candidate's video large (speaker view).
 2. In the app set **Video source -> Capture a window (no OBS needed)**, pick the call window.
-3. Click **Preview what will be analysed** and use the **Trim** sliders until the candidate's
-   face fills most of the picture and no other face is visible. (A small tile reads as
-   "no face" -- that is the usual reason nothing shows up.)
+   Leave **Capture method** on *Direct capture*: it works even if the call window is covered
+   or behind other windows. (If you see a note that screen copy is being used instead, keep
+   the call window fully visible.)
+3. The **Live preview** shows the window as it will be analysed, updating about twice a second,
+   with a green "Face found" / yellow "No face found" line under it. Move the **Trim** sliders
+   until the candidate's face fills most of the picture, no other face is visible, and it says
+   "Face found". (A small tile reads as "no face" -- that is the usual reason nothing shows up.)
+   The preview stops by itself when you start a session, switch mode, or close the page.
 4. Leave **Solo test mode** off and use headphones, so the candidate's voice comes from your
    default output (captured by loopback) and your mic stays the separate interviewer channel.
 5. Start the session; the candidate looks at their own camera for the first 8 s.
-It keeps working if another window is on top, but not if the call window is minimised.
+Direct capture keeps working if another window is on top, but not if the call window is
+minimised. Keep the app and the call in **separate windows**, not two tabs of one window --
+a background tab isn't drawn, so there is nothing to capture.
 
 ## 5. Start a session and get through calibration
 
@@ -126,6 +133,16 @@ Under the scores there is a **Coaching tips (live)** section. Expect 🔸 tips f
 readings (e.g. look away from the camera for a while → a camera-facing tip), ✅ for good
 ones, or an ℹ️ line if there isn't enough data yet. These use only the latest reading, so
 they can flip while you talk — that's expected; the report is the steadier view.
+
+## 8a-i. The "Audio channels" panel (live view)
+
+Two columns, one per channel, each with a level bar and a status: **hearing sound**, **very quiet**,
+**silent**, or **no audio arriving from this device** (the device itself isn't delivering -- a
+different problem from silence). Left = you (interviewer mic): shows what you last said and how
+many questions were detected. Right = the candidate (call audio from your speakers; your own mic in
+solo test mode): shows the last words transcribed. Use it to tell apart "it heard me" from "nothing
+reaches the app": speak and the left bar should move; have the candidate speak and the right one
+should. Your own speech never appears in the candidate's transcript -- that is by design.
 
 ## 8a. Automatic question detection
 

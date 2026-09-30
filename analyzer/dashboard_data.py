@@ -10,6 +10,7 @@ directly in app.py, it likely belongs here instead so it can be tested.
 from __future__ import annotations
 
 import json
+import math
 
 
 def latest_value(rows: list[tuple[float, float]]) -> float | None:
@@ -44,6 +45,7 @@ EVENT_LABELS = {
     "face_lost": "Not visible in frame",
     "calibration_done": "Calibration complete",
     "question_marker": "New question marked",
+    "interviewer_turn": "Interviewer spoke",
 }
 
 # Events worth showing in the "needs follow-up" timeline. calibration_done
@@ -74,12 +76,54 @@ def format_event(row: tuple) -> str:
     elif kind == "gaze_away" and isinstance(detail.get("camera_facing_fraction"), (int, float)):
         extra = f" ({detail['camera_facing_fraction'] * 100:.0f}% facing camera)"
 
+    elif kind == "interviewer_turn":
+        said = detail.get("text")
+        if said:
+            extra = f': "{said}"'
+
     elif kind == "question_marker":
         qid, qtext = detail.get("question_id"), detail.get("text")
         if isinstance(qid, int):
             extra = f" (Q{qid}" + (f": {qtext}" if qtext else "") + ")"
 
     return f"[{ts}] {label}{extra}"
+
+
+def channel_status(level: float | None, last_chunk_time: float | None, now: float,
+                   stale_after_s: float = 3.0) -> tuple[str, float]:
+    """(label, bar fraction 0-1) for an audio channel's live indicator.
+    `level` is the recent RMS loudness (0-1); `last_chunk_time` the wall-clock
+    time audio last arrived from the device. No recent audio at all is reported
+    as a problem (the device isn't delivering), which is different from silence
+    (the device works but nobody is making sound)."""
+    if last_chunk_time is None or now - last_chunk_time > stale_after_s:
+        return "⚠️ no audio arriving from this device", 0.0
+    level = max(level or 0.0, 0.0)
+    db = 20 * math.log10(level + 1e-9)
+    fraction = min(max((db + 70) / 60, 0.0), 1.0)   # -70 dB -> empty, -10 dB -> full
+    if level < 0.0005:
+        return "🔇 silent", fraction
+    if level < 0.005:
+        return "🔈 very quiet", fraction
+    return "🔊 hearing sound", fraction
+
+
+def interviewer_turns(rows: list[tuple], limit: int = 2) -> list[str]:
+    """The newest `limit` things the interviewer's mic transcribed, newest
+    first. `rows` are EventLog.recent_events() rows (already newest-first)."""
+    out = []
+    for r in rows:
+        if r[3] != "interviewer_turn":
+            continue
+        try:
+            text = json.loads(r[4]).get("text") if r[4] else None
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            text = None
+        if text:
+            out.append(text)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def summarize_events(rows: list[tuple], kinds: set[str] | None = None, limit: int = 20) -> list[str]:

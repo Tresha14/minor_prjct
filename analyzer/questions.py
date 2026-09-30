@@ -77,17 +77,52 @@ _QUESTION_PHRASES = re.compile(
 )
 
 
+# Words that carry no question content: greetings, fillers, acknowledgements.
+_FILLER_WORDS = {
+    "ah", "uh", "um", "umm", "uhh", "er", "erm", "hmm", "mm", "mhm", "oh", "okay", "ok", "so", "well",
+    "yeah", "yes", "right", "hello", "hi", "hey", "alright", "thanks", "thank", "sorry",
+}
+# Call chatter and small talk: a sound check or a pleasantry is not an interview question.
+_CHATTER = re.compile(
+    r"\b(can you (hear|see) me|can you hear|hear me|see my screen|on mute|audio|my mic|microphone|"
+    r"camera|connection|testing|sound check|how are you|how's it going|how is it going|"
+    r"nice to meet you|good (morning|afternoon|evening))\b"
+)
+MIN_CONTENT_WORDS = 4   # a real interview question has at least this many meaningful words
+
+
+def _content_word_count(sentence: str) -> int:
+    words = re.findall(r"[a-z']+", sentence.lower())
+    words = [w for w in words if w not in _FILLER_WORDS]
+    # "Hello? Hello?" / "maybe, maybe": repeated words shouldn't pad the count
+    return sum(1 for i, w in enumerate(words) if i == 0 or w != words[i - 1])
+
+
+def extract_question_text(text: str) -> str | None:
+    """The part of an interviewer's spoken turn that is an actual interview
+    question, or None. Judged sentence by sentence, so "Hello? Hello? How are
+    you? Tell me about your last job." keeps only the last sentence.
+
+    A sentence counts if it has at least MIN_CONTENT_WORDS meaningful words
+    (fillers and greetings don't count), isn't call chatter or small talk, and
+    either has a '?' (Whisper adds one to most spoken questions) or uses clear
+    question/prompt phrasing ("tell me about...", "describe a time..."). A bare
+    'what'/'how' isn't enough: if the mic also picks up the candidate, "what I
+    did was..." must not become a question."""
+    kept = []
+    for sentence in re.split(r"(?<=[.?!])\s+", text.strip()):
+        s = sentence.strip()
+        low = s.lower()
+        if not s or _CHATTER.search(low) or _content_word_count(s) < MIN_CONTENT_WORDS:
+            continue
+        if "?" in s or _QUESTION_PHRASES.search(low):
+            kept.append(s)
+    return " ".join(kept) if kept else None
+
+
 def looks_like_question(text: str) -> bool:
-    """True if an interviewer's spoken turn reads as a question or an
-    interview prompt. Whisper adds a '?' to most spoken questions, so that
-    counts on its own; without one, only clear question/prompt phrasing
-    counts ("tell me about...", "can you...", "describe a time..."). A bare
-    'what'/'how' isn't enough by itself: if the interviewer's mic also picks
-    up the candidate, "what I did was..." must not become a question."""
-    t = text.strip().lower()
-    if len(t.split()) < 3:
-        return False
-    return "?" in t or bool(_QUESTION_PHRASES.search(t))
+    """True if `extract_question_text` finds a question in the spoken turn."""
+    return extract_question_text(text) is not None
 
 
 def mark_question(log, text: str, t: float) -> int:

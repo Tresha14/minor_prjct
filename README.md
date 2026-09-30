@@ -265,13 +265,17 @@ minor_project/
   live view and an `AppTest` of the review page, so both screens are exercised without hardware.
 
 ### Not done yet
-- **Call-window capture: built, but only tried on a paused YouTube page and a webcam
-  window.** `analyzer/window_capture.py` grabs a chosen window directly (Windows only,
-  pure `ctypes`, **no OBS needed**): pick **Video source -> Capture a window** in the app,
-  choose the call window, trim the edges until the candidate's face fills the preview.
-  Checked by hand: it listed real windows, grabbed non-black frames at ~25/s, and the face
-  tracker found a face in 30/30 frames of a captured webcam window. **Not yet run on a real
-  Zoom/Meet/Teams call.** The OBS Virtual Camera route (camera index) still works too.
+- **Call-window capture: built, but not yet run on a real Zoom/Meet/Teams call.**
+  `analyzer/window_capture.py` captures a chosen window directly (Windows only, **no OBS**):
+  pick **Video source -> Capture a window**, choose the call window, trim the edges until the
+  candidate's face fills the preview. The default **Direct capture** uses Windows Graphics
+  Capture (the API OBS's window capture uses) through the pinned `windows-capture` package, so
+  it works even when the window is covered and it sees GPU-drawn video; if it can't start the
+  app falls back to screen copy and says so. Checked by hand: frames arrive at ~10/s from a
+  covered window, the face tracker found a face in 40/40 frames of a captured webcam window,
+  closing the window mid-session is detected, and repeated start/stop leaks no threads.
+  Also tested with a real window (a red test window captured as red, in the right channel
+  order). The OBS Virtual Camera route (camera index) still works too.
   Compressed call video is expected to lower gaze accuracy (synopsis 5.2); measuring that
   is still to do. Camera capture now requests 1280x720, because OpenCV's 640x480 default
   gave garbled frames from OBS's virtual camera.

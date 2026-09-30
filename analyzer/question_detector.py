@@ -27,7 +27,7 @@ import logging
 import numpy as np
 
 from analyzer.config import AUDIO
-from analyzer.questions import looks_like_question, mark_question
+from analyzer.questions import extract_question_text, mark_question
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,15 @@ class InterviewerQuestionDetector:
     def _handle_turn(self, audio: np.ndarray, t_start: float) -> None:
         words = self.transcriber.transcribe_chunk(audio, offset_s=t_start)
         text = " ".join(w.text for w in words).strip()
-        if text and looks_like_question(text):
-            n = mark_question(self.log, text[:300], t_start)
+        if not text:
+            return
+        # Every turn is logged (so the live view can show what the interviewer's mic
+        # heard), but only real questions become question markers. This is an event,
+        # not transcript: it never reaches the candidate's words or scores.
+        self.log.event("audio_interviewer", "interviewer_turn", t_start=t_start,
+                       t_end=t_start + len(audio) / self.sample_rate, detail={"text": text[:300]})
+        question = extract_question_text(text)
+        if question:
+            n = mark_question(self.log, question[:300], t_start)
             self.questions_marked += 1
-            logger.info("Auto-marked question %d at t=%.1fs: %s", n, t_start, text[:80])
+            logger.info("Auto-marked question %d at t=%.1fs: %s", n, t_start, question[:80])
