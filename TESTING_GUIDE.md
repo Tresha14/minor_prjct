@@ -58,6 +58,19 @@ normally the candidate's voice comes from the call's speaker output, not your mi
 **Never use solo test mode for an actual practice interview** — it skips the
 interviewer's own channel entirely. Leave it unchecked for a real two-person run.
 
+## 4b. Testing a real video call (no OBS)
+
+Use this when the candidate is on another laptop, in a Zoom/Meet/Teams call on yours.
+1. Join the call on your laptop; put the candidate's video large (speaker view).
+2. In the app set **Video source -> Capture a window (no OBS needed)**, pick the call window.
+3. Click **Preview what will be analysed** and use the **Trim** sliders until the candidate's
+   face fills most of the picture and no other face is visible. (A small tile reads as
+   "no face" -- that is the usual reason nothing shows up.)
+4. Leave **Solo test mode** off and use headphones, so the candidate's voice comes from your
+   default output (captured by loopback) and your mic stays the separate interviewer channel.
+5. Start the session; the candidate looks at their own camera for the first 8 s.
+It keeps working if another window is on top, but not if the call window is minimised.
+
 ## 5. Start a session and get through calibration
 
 Click **Start session**. For the first ~8 seconds you should see a prominent
@@ -113,6 +126,16 @@ Under the scores there is a **Coaching tips (live)** section. Expect 🔸 tips f
 readings (e.g. look away from the camera for a while → a camera-facing tip), ✅ for good
 ones, or an ℹ️ line if there isn't enough data yet. These use only the latest reading, so
 they can flip while you talk — that's expected; the report is the steadier view.
+
+## 8a. Automatic question detection
+
+With **Detect questions automatically from my microphone** ticked (default, and only when
+solo test mode is off), you don't mark anything: ask a question out loud, pause ~2 s, and
+within a few seconds a `New question marked (Q1: <your wording>)` event appears and the
+caption shows "auto question detection on (N found)". Use headphones, otherwise the
+candidate's voice leaks into your mic. Statements ("thanks, great answer") are not marked;
+the manual button still works for anything it misses. **Not yet tried on a live mic** --
+check that the wording it captured is right, and that it doesn't mark the candidate's answers.
 
 ## 8. Mark questions (with wording) and check timing
 

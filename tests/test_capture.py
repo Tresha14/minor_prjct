@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from analyzer.capture import InterviewerMonitor, QueuedConsumer, to_mono_float32
+from analyzer.capture import AudioSource, InterviewerMonitor, QueuedConsumer, to_mono_float32
 from analyzer.events import EventLog
 
 
@@ -115,3 +115,14 @@ def test_queued_consumer_drains_remaining_items_on_stop():
         consumer.put(i)
     consumer.stop(timeout=2.0)  # must wait for the queue to fully drain
     assert results == [0, 1, 2, 3, 4]
+
+
+def test_audio_source_records_why_it_stopped_instead_of_dying_silently():
+    class BrokenDevice:
+        def recorder(self, samplerate):
+            raise RuntimeError("Error 0x8889000a")
+
+    src = AudioSource(BrokenDevice())
+    src.start(lambda chunk, t: None, time.time())
+    src._thread.join(timeout=2)
+    assert src.error is not None and "0x8889000a" in src.error

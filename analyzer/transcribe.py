@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 
 from analyzer.audio_features import Word
@@ -64,6 +65,7 @@ class Transcriber:
                  device: str = AUDIO.whisper_device,
                  compute_type: str = AUDIO.whisper_compute_type):
         self.model_size = model_size
+        self._lock = threading.Lock()
         self.device, self.compute_type = self._load_with_fallback(device, compute_type)
 
     def _load_with_fallback(self, device: str, compute_type: str):
@@ -89,15 +91,20 @@ class Transcriber:
         """Transcribes one chunk of audio and returns word-level timestamps
         shifted by `offset_s` so they line up with the session clock.
         """
-        segments, _info = self.model.transcribe(
-            audio_path_or_array,
-            word_timestamps=True,
-            language=language,
-            vad_filter=False,  # VAD is handled separately (see vad.py) so we don't double-gate
-            initial_prompt="Umm, uh, so, like, you know, I think, maybe...",  # nudges Whisper to keep fillers
-        )
-        words: list[Word] = []
-        for seg in segments:
-            for w in seg.words or []:
-                words.append(Word(text=w.word.strip(), start=w.start + offset_s, end=w.end + offset_s))
+        # One lock: the candidate's audio and the interviewer's question
+        # detection both call this from different threads, and the model must
+        # only run one transcription at a time. `segments` is a lazy
+        # generator, so it has to be consumed inside the lock too.
+        with self._lock:
+            segments, _info = self.model.transcribe(
+                audio_path_or_array,
+                word_timestamps=True,
+                language=language,
+                vad_filter=False,  # VAD is handled separately (see vad.py) so we don't double-gate
+                initial_prompt="Umm, uh, so, like, you know, I think, maybe...",  # nudges Whisper to keep fillers
+            )
+            words: list[Word] = []
+            for seg in segments:
+                for w in seg.words or []:
+                    words.append(Word(text=w.word.strip(), start=w.start + offset_s, end=w.end + offset_s))
         return words

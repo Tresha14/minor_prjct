@@ -265,13 +265,16 @@ minor_project/
   live view and an `AppTest` of the review page, so both screens are exercised without hardware.
 
 ### Not done yet
-- **Call-window video capture via OBS Virtual Camera.** `capture.py`'s `VideoSource`
-  works with any camera device index, so once OBS is installed its virtual camera can
-  be used as-is -- nothing in the code needs to change, just point `camera_index` at it
-  (see `analyzer/capture.py`'s docstring). **Blocked: OBS Studio is not installed on
-  the dev machine yet.** Until it is, everything has been developed and validated against
-  a plain webcam. Compressed call video is expected to lower gaze accuracy (synopsis 5.2);
-  measuring that is part of this task.
+- **Call-window capture: built, but only tried on a paused YouTube page and a webcam
+  window.** `analyzer/window_capture.py` grabs a chosen window directly (Windows only,
+  pure `ctypes`, **no OBS needed**): pick **Video source -> Capture a window** in the app,
+  choose the call window, trim the edges until the candidate's face fills the preview.
+  Checked by hand: it listed real windows, grabbed non-black frames at ~25/s, and the face
+  tracker found a face in 30/30 frames of a captured webcam window. **Not yet run on a real
+  Zoom/Meet/Teams call.** The OBS Virtual Camera route (camera index) still works too.
+  Compressed call video is expected to lower gaze accuracy (synopsis 5.2); measuring that
+  is still to do. Camera capture now requests 1280x720, because OpenCV's 640x480 default
+  gave garbled frames from OBS's virtual camera.
 - **A real-hardware pass over the newest features.** Questions, live text signals, tips, the
   report and combined flags are covered by fake-based tests and a fake-session `AppTest`, and
   the report was viewed in a browser on synthetic data -- but none of it has been re-run with

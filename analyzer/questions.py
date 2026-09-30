@@ -19,6 +19,7 @@ fast to test with no Streamlit/camera/mic.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 MARKER_KIND = "question_marker"
@@ -67,6 +68,26 @@ def read_markers(event_rows: list[tuple]) -> list[QuestionMarker]:
             t_start=row[0],
         ))
     return markers
+
+
+_QUESTION_PHRASES = re.compile(
+    r"\b(tell me|walk me through|describe|explain|talk (me )?(about|through)|"
+    r"(can|could|would|will) you|do you|did you|have you|are you|what (is|was|are|were|do|did|would)|"
+    r"why (did|do|are|would)|how (did|do|would|have|are)|give me an example)\b"
+)
+
+
+def looks_like_question(text: str) -> bool:
+    """True if an interviewer's spoken turn reads as a question or an
+    interview prompt. Whisper adds a '?' to most spoken questions, so that
+    counts on its own; without one, only clear question/prompt phrasing
+    counts ("tell me about...", "can you...", "describe a time..."). A bare
+    'what'/'how' isn't enough by itself: if the interviewer's mic also picks
+    up the candidate, "what I did was..." must not become a question."""
+    t = text.strip().lower()
+    if len(t.split()) < 3:
+        return False
+    return "?" in t or bool(_QUESTION_PHRASES.search(t))
 
 
 def mark_question(log, text: str, t: float) -> int:

@@ -21,7 +21,7 @@ class AudioConfig:
     # (by testing, not by guessing) makes Whisper silently DROP the speech
     # right after the cut rather than mis-transcribe it -- see
     # tests/test_audio_worker.py and README.md "Known gotchas".
-    target_chunk_s: float = 8.0        # aim to cut once buffered audio passes this length
+    target_chunk_s: float = 4.0        # aim to cut once buffered audio passes this length (was 8.0; lowered to cut live-transcript lag)
     max_chunk_s: float = 15.0          # force a cut here even mid-speech, so one long
                                         # monologue can't stall transcription indefinitely
     min_chunk_s: float = 2.0           # never cut a chunk shorter than this

@@ -5,8 +5,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from analyzer.dashboard_data import (
-    format_event, format_seconds, latest_value, metric_delta_label, summarize_events,
+    format_event, format_seconds, latest_value, metric_delta_label, summarize_events, window_average,
 )
+
+
+def test_window_average_uses_only_the_last_window():
+    rows = [(0.0, 100.0), (50.0, 10.0), (60.0, 20.0), (70.0, 30.0)]
+    assert window_average(rows, now_t=70.0, window_s=30.0) == 20.0  # 50s, 60s, 70s; the 0s reading is out
+
+
+def test_window_average_none_when_no_readings_in_window():
+    assert window_average([], now_t=10.0) is None
+    assert window_average([(0.0, 5.0)], now_t=100.0, window_s=30.0) is None
 
 
 def test_latest_value_returns_most_recent():

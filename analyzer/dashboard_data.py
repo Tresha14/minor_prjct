@@ -21,6 +21,16 @@ def latest_value(rows: list[tuple[float, float]]) -> float | None:
     return rows[-1][1]
 
 
+def window_average(rows: list[tuple[float, float]], now_t: float, window_s: float = 30.0) -> float | None:
+    """Plain mean of the readings in the last `window_s` seconds up to
+    `now_t`, or None if there are none. The 2-second live readings jump
+    around; this is the steadier number shown beside them."""
+    values = [v for (t, v) in rows if now_t - window_s <= t <= now_t]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def format_seconds(t: float) -> str:
     """12.4 -> '00:12', 75.0 -> '01:15'. Negative/garbage input clamps to 0
     rather than producing a confusing negative timestamp on screen."""

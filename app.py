@@ -38,6 +38,7 @@ from analyzer.capture import SessionCapture
 from analyzer.config import PATHS
 from analyzer.dashboard_data import (
     FLAGGED_EVENT_KINDS, format_seconds, format_tip, latest_value, metric_delta_label, summarize_events,
+    window_average,
 )
 from analyzer.feedback import generate_tips_from_log
 from analyzer.fusion import compute_from_log, write_scores
@@ -55,6 +56,58 @@ if page_mode == "Review saved session":
     st.stop()
 
 
+CAMERA_MODE = "Camera (webcam or OBS Virtual Camera)"
+WINDOW_MODE = "Capture a window (no OBS needed)"
+
+
+def current_crop() -> tuple[float, float, float, float]:
+    """Edge trim from the sliders, as 0-1 fractions: (left, top, right, bottom)."""
+    return tuple(st.session_state.get(k, 0) / 100 for k in ("crop_left", "crop_top", "crop_right", "crop_bottom"))
+
+
+SCREEN_METHOD = "Screen copy (window must stay uncovered)"
+OFFSCREEN_METHOD = "Off-screen (works if covered, but may miss video)"
+
+
+def current_method() -> str:
+    return "offscreen" if st.session_state.get("capture_method") == OFFSCREEN_METHOD else "screen"
+
+
+def render_window_picker() -> None:
+    """Window dropdown, edge-trim sliders and a one-shot preview. The trim is
+    there because the face tracker needs the face to be big: with a whole
+    Meet/Zoom window captured, a small video tile reads as 'no face'."""
+    from analyzer.window_capture import crop_frame, grab_window, list_windows
+
+    windows = list_windows()
+    titles = dict(windows)
+    st.selectbox(
+        "Window to capture", options=list(titles), key="window_hwnd",
+        format_func=lambda h: titles[h][:90], index=None if not titles else 0,
+        placeholder="Open your call window first, then pick it here",
+        help="Works even if another window is on top of it, but not if it's minimised.",
+    )
+    st.radio(
+        "Capture method", [SCREEN_METHOD, OFFSCREEN_METHOD], key="capture_method", horizontal=True,
+        help=("Screen copy records what is actually displayed, so browser video calls (Meet, Zoom in "
+              "Chrome) show up, but if another window covers the call window it records that "
+              "instead -- arrange your windows side by side. Off-screen works even when covered, but "
+              "GPU-drawn video (often the call video itself) can come out black."),
+    )
+    cols = st.columns(4)
+    for col, label, key in zip(cols, ("Trim left %", "Trim top %", "Trim right %", "Trim bottom %"),
+                               ("crop_left", "crop_top", "crop_right", "crop_bottom")):
+        col.slider(label, 0, 60, 0, key=key)
+    if st.button("Preview what will be analysed", disabled=not st.session_state.get("window_hwnd")):
+        frame = grab_window(st.session_state.window_hwnd, current_method())
+        if frame is None:
+            st.error("Couldn't capture that window (closed or minimised?).")
+        else:
+            st.image(crop_frame(frame, current_crop())[:, :, ::-1],
+                     caption="Trim until the candidate's face fills most of this picture, "
+                             "and only one face is visible.")
+
+
 @st.cache_resource(show_spinner="Loading the speech model (first run downloads a few hundred MB)...")
 def get_transcriber():
     from analyzer.transcribe import Transcriber
@@ -67,8 +120,23 @@ def start_session() -> None:
     transcriber = get_transcriber()
     tracker = FaceTracker()
     session_dir = Path(PATHS.data_dir) / time.strftime("%Y%m%d_%H%M%S")
+    video_source = None
+    if st.session_state.get("video_mode") == WINDOW_MODE:
+        from analyzer.config import VIDEO
+        from analyzer.window_capture import WindowSource
+        hwnd = st.session_state.get("window_hwnd")
+        if not hwnd:
+            tracker.close()
+            st.session_state.start_error = "Pick a window to capture first."
+            return
+        video_source = WindowSource(hwnd, target_fps=VIDEO.target_fps, crop=current_crop(),
+                                    method=current_method())
+    st.session_state.start_error = None
     session = SessionCapture(session_dir, transcriber, tracker,
-                              solo_test_mode=st.session_state.get("solo_test_mode", False))
+                              camera_index=int(st.session_state.get("camera_index", 0)),
+                              solo_test_mode=st.session_state.get("solo_test_mode", False),
+                              video_source=video_source,
+                              auto_questions=st.session_state.get("auto_questions", True))
     session.start()
 
     st.session_state.session = session
@@ -132,6 +200,26 @@ if session is None:
     if st.session_state.get("last_session_dir"):
         st.success("Last session saved. Switch **Mode → Review saved session** in the sidebar "
                    "to see its report.")
+    if st.session_state.get("start_error"):
+        st.error(st.session_state.start_error)
+    st.radio("Video source", [CAMERA_MODE, WINDOW_MODE], key="video_mode",
+             help="To analyse someone on a Zoom/Meet/Teams call, capture that call window directly.")
+    if st.session_state.get("video_mode") == WINDOW_MODE:
+        render_window_picker()
+    else:
+        st.number_input(
+            "Camera index", min_value=0, max_value=9, value=0, step=1, key="camera_index",
+            help="0 is usually the built-in webcam; an OBS Virtual Camera is usually 1.",
+        )
+    st.checkbox(
+        "Detect questions automatically from my microphone", value=True, key="auto_questions",
+        help=(
+            "Listens to the interviewer's microphone, and each time you ask a question it is "
+            "marked for you, with its wording -- no typing, no button. Use headphones so the "
+            "candidate's voice doesn't leak into your mic. Doesn't apply in solo test mode "
+            "(there's no separate interviewer channel); the manual button always still works."
+        ),
+    )
     st.checkbox(
         "🧪 Solo test mode — transcribe my own microphone as if I were the candidate",
         key="solo_test_mode",
@@ -158,6 +246,9 @@ else:
         # which looked frozen during live testing.
         elapsed = time.time() - session._t0 if session._t0 else 0.0
         mode_note = " · 🧪 solo test mode (own mic transcribed as candidate)" if session.solo_test_mode else ""
+        if getattr(session, "question_detector", None) is not None:
+            mode_note += (f" · 🎙 auto question detection on "
+                          f"({session.question_detector.questions_marked} found)")
         st.caption(f"Session running — {format_seconds(elapsed)} elapsed · "
                    f"saving to `{st.session_state.session_dir}`{mode_note}")
 
@@ -168,6 +259,13 @@ else:
         # instead of the camera, completely ordinary posture afterward
         # reads as "looking away". This banner is the fix -- it tells
         # whoever is on camera exactly when to look at the lens.
+        for problem in session.audio_problems():
+            st.error(
+                f"🔇 {problem}. Another app (often Zoom/Meet) may be holding that device, or Windows' "
+                "default input/output changed. Set the right defaults in Windows Sound settings, "
+                "then stop and restart the session."
+            )
+
         remaining = session.video_worker.calibration_seconds_remaining(elapsed)
         if remaining > 0:
             st.warning(
@@ -187,24 +285,20 @@ else:
         hedge_rate = log.recent_metrics("hedge_rate")
         st.subheader("Live indicators")
         metric_cols = st.columns(6)
-        cf = latest_value(camera_facing)
-        metric_cols[0].metric("Camera-facing", f"{cf * 100:.0f}%" if cf is not None else "—",
-                               delta=metric_delta_label(camera_facing))
-        w = latest_value(wpm)
-        metric_cols[1].metric("Words / min", f"{w:.0f}" if w is not None else "—",
-                               delta=metric_delta_label(wpm))
-        pr = latest_value(pause_rate)
-        metric_cols[2].metric("Pause rate", f"{pr * 100:.0f}%" if pr is not None else "—",
-                               delta=metric_delta_label(pause_rate))
-        fr = latest_value(filler_rate)
-        metric_cols[3].metric("Fillers / 100 words", f"{fr:.1f}" if fr is not None else "—",
-                               delta=metric_delta_label(filler_rate))
-        br = latest_value(blink_rate)
-        metric_cols[4].metric("Blinks / min", f"{br:.0f}" if br is not None else "—",
-                               delta=metric_delta_label(blink_rate))
-        hr = latest_value(hedge_rate)
-        metric_cols[5].metric("Hedges / 100 words", f"{hr:.1f}" if hr is not None else "—",
-                               delta=metric_delta_label(hedge_rate))
+        st.caption("Big number = latest reading (jumps around). Line under it = average of the last 30 s (steadier).")
+
+        def tile(col, label, rows, scale=1.0, fmt="{:.0f}", suffix=""):
+            live, smooth = latest_value(rows), window_average(rows, elapsed)
+            show = lambda v: (fmt.format(v * scale) + suffix) if v is not None else "—"
+            col.metric(label, show(live), delta=metric_delta_label(rows))
+            col.caption(f"last 30 s: **{show(smooth)}**")
+
+        tile(metric_cols[0], "Camera-facing", camera_facing, scale=100, suffix="%")
+        tile(metric_cols[1], "Words / min", wpm)
+        tile(metric_cols[2], "Pause rate", pause_rate, scale=100, suffix="%")
+        tile(metric_cols[3], "Fillers / 100 words", filler_rate, fmt="{:.1f}")
+        tile(metric_cols[4], "Blinks / min", blink_rate)
+        tile(metric_cols[5], "Hedges / 100 words", hedge_rate, fmt="{:.1f}")
 
         # Silence on the candidate channel for a while is normal at the very
         # start (calibration, no one's spoken yet) but confusing later on --

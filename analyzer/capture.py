@@ -10,10 +10,9 @@ workers continuously.
 
 Sources used (all confirmed working manually earlier in this project, see
 README.md "Known gotchas" / status section):
-  - Video: a plain webcam via OpenCV (`cv2.VideoCapture`). Swapping this for
-    an OBS Virtual Camera later is just picking a different device index --
-    see `list_video_devices()` / the `camera_index` parameter -- once OBS is
-    installed, its virtual camera shows up as an ordinary camera device.
+  - Video: a plain webcam via OpenCV (`cv2.VideoCapture`), an OBS Virtual
+    Camera (just a different `camera_index`), or -- with no extra software --
+    a call window captured directly by `window_capture.WindowSource`.
   - Candidate audio: system-audio loopback via `soundcard` (captures
     whatever the interviewer's speakers are playing -- i.e. the candidate's
     side of the call).
@@ -44,6 +43,7 @@ import numpy as np
 from analyzer.audio_worker import AudioWorker
 from analyzer.config import AUDIO, VIDEO
 from analyzer.events import EventLog
+from analyzer.question_detector import InterviewerQuestionDetector
 from analyzer.questions import score_answer_relevance
 from analyzer.text import TextWorker
 from analyzer.vad import VoiceActivityDetector
@@ -69,9 +69,15 @@ class VideoSource:
     background thread and calls `on_frame(frame_bgr, t)` for each one.
     """
 
-    def __init__(self, camera_index: int = 0, target_fps: float | None = None):
+    def __init__(self, camera_index: int = 0, target_fps: float | None = None,
+                 frame_size: tuple[int, int] | None = (1280, 720)):
         self.camera_index = camera_index
         self.target_fps = target_fps
+        # Requested explicitly because DirectShow's 640x480 default comes out
+        # as garbled, dark frames from an OBS Virtual Camera (found by testing
+        # it: zero faces detected). A webcam that can't do this size just
+        # falls back to the nearest one it supports.
+        self.frame_size = frame_size
         self._cap = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -81,6 +87,9 @@ class VideoSource:
         self._cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
         if not self._cap.isOpened():
             raise RuntimeError(f"Could not open camera index {self.camera_index}")
+        if self.frame_size:
+            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_size[0])
+            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_size[1])
 
         min_interval = (1.0 / self.target_fps) if self.target_fps else 0.0
 
@@ -125,16 +134,24 @@ class AudioSource:
         self.chunk_seconds = chunk_seconds
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self.error: str | None = None  # set if the device stops working mid-session
 
     def start(self, on_chunk, t0: float) -> None:
         numframes = int(self.chunk_seconds * self.sample_rate)
 
         def _loop():
-            with self.device.recorder(samplerate=self.sample_rate) as rec:
-                while not self._stop.is_set():
-                    raw = rec.record(numframes=numframes)
-                    t = time.time() - t0
-                    on_chunk(to_mono_float32(raw), t)
+            # A failure here used to die silently in this background thread
+            # (only a traceback in the terminal), leaving the dashboard just
+            # empty. Keep the reason so the UI can show it.
+            try:
+                with self.device.recorder(samplerate=self.sample_rate) as rec:
+                    while not self._stop.is_set():
+                        raw = rec.record(numframes=numframes)
+                        t = time.time() - t0
+                        on_chunk(to_mono_float32(raw), t)
+            except Exception as exc:  # noqa: BLE001 - any device failure should be surfaced, not swallowed
+                logger.exception("AudioSource(%s) stopped", self.device)
+                self.error = f"{type(exc).__name__}: {exc}"
 
         self._thread = threading.Thread(target=_loop, name=f"AudioSource({self.device})", daemon=True)
         self._thread.start()
@@ -243,8 +260,18 @@ class SessionCapture:
 
     def __init__(self, session_dir, transcriber, face_tracker,
                  camera_index: int = 0, candidate_device=None, interviewer_device=None,
-                 solo_test_mode: bool = False):
-        """`solo_test_mode=True` points the candidate (transcribed) channel
+                 solo_test_mode: bool = False, video_source=None,
+                 auto_questions: bool = False):
+        """`video_source` replaces the camera with anything that has
+        `start(on_frame, t0)` / `stop()` -- e.g. `window_capture.WindowSource`,
+        which captures a call window directly so OBS isn't needed.
+
+        `auto_questions=True` transcribes the interviewer's microphone turns and
+        marks each one that reads as a question (see question_detector.py), so
+        nobody has to press "Mark next question". Ignored in solo test mode,
+        which has no separate interviewer channel.
+
+        `solo_test_mode=True` points the candidate (transcribed) channel
         at your own microphone instead of speaker loopback, and skips the
         separate interviewer channel entirely (both would otherwise fight
         over the same physical microphone). This exists purely for testing
@@ -267,7 +294,7 @@ class SessionCapture:
         # found by testing to starve the audio-capture threads of CPU time
         # badly enough to drop words near the end of a clip (see README.md
         # "Known gotchas"). Throttling video to VIDEO.target_fps fixed it.
-        self.video_source = VideoSource(camera_index=camera_index, target_fps=VIDEO.target_fps)
+        self.video_source = video_source or VideoSource(camera_index=camera_index, target_fps=VIDEO.target_fps)
         if solo_test_mode:
             self.candidate_source = AudioSource(candidate_device or default_microphone_device())
             self.interviewer_source = None
@@ -283,6 +310,15 @@ class SessionCapture:
         # them -- if that ever changes, the same pattern applies.
         self._candidate_queue = QueuedConsumer(self.candidate_worker.push_audio)
 
+        # With auto question detection the interviewer channel also does
+        # transcription, so it gets its own queue for the same reason.
+        self.question_detector = None
+        self._interviewer_queue = None
+        if auto_questions and self.interviewer_source is not None:
+            self.question_detector = InterviewerQuestionDetector(
+                self.log, VoiceActivityDetector(), transcriber, monitor=self.interviewer_monitor)
+            self._interviewer_queue = QueuedConsumer(self.question_detector.push_audio)
+
         self._t0 = None
 
     def start(self) -> None:
@@ -292,15 +328,30 @@ class SessionCapture:
         self.video_source.start(self.video_worker.process_frame, self._t0)
         self.candidate_source.start(self._candidate_queue.put, self._t0)
         if self.interviewer_source is not None:
-            self.interviewer_source.start(self.interviewer_monitor.push_audio, self._t0)
+            if self._interviewer_queue is not None:
+                self._interviewer_queue.start()
+                self.interviewer_source.start(self._interviewer_queue.put, self._t0)
+            else:
+                self.interviewer_source.start(self.interviewer_monitor.push_audio, self._t0)
         logger.info("SessionCapture started (solo_test_mode=%s), writing to %s",
                     self.solo_test_mode, self.log.db_path)
+
+    def audio_problems(self) -> list[str]:
+        """Human-readable reasons an audio channel stopped, empty if all is well."""
+        problems = []
+        for label, src in (("Candidate audio (speaker loopback, or the mic in solo mode)", self.candidate_source),
+                           ("Interviewer microphone", self.interviewer_source)):
+            if src is not None and getattr(src, "error", None):
+                problems.append(f"{label} stopped: {src.error}")
+        return problems
 
     def stop(self) -> None:
         self.video_source.stop()
         self.candidate_source.stop()
         if self.interviewer_source is not None:
             self.interviewer_source.stop()
+        if self._interviewer_queue is not None:
+            self._interviewer_queue.stop()
         self._candidate_queue.stop()  # drains whatever was captured right up to the end
         t_end = time.time() - self._t0 if self._t0 else 0.0
         self.video_worker.finish(t_end)

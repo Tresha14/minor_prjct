@@ -64,6 +64,10 @@ class _FakeSession:
         self._t0 = time.time() - elapsed
         self.solo_test_mode = True
         self.video_worker = _FakeVideoWorker()
+        self.problems: list[str] = []
+
+    def audio_problems(self):
+        return self.problems
 
 
 def test_live_view_renders_scores_and_coaching_tips_from_seeded_log(tmp_path):
@@ -113,3 +117,23 @@ def test_review_mode_renders_a_saved_session_and_offers_download(tmp_path, monke
     assert any("Session Report" in t.value for t in at.title)
     assert at.selectbox[0].options  # the saved session is listed
     assert not any("Start session" in b.label for b in at.button)  # live controls not rendered in review mode
+
+
+def test_live_view_shows_a_banner_when_an_audio_device_stopped(tmp_path):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+    from analyzer.events import EventLog
+
+    log = EventLog(tmp_path)
+    log.session_start(t0=0.0)
+    session = _FakeSession(log)
+    session.problems = ["Interviewer microphone stopped: RuntimeError: Error 0x8889000a"]
+
+    at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"))
+    at.session_state["session"] = session
+    at.session_state["face_tracker"] = None
+    at.session_state["session_dir"] = str(tmp_path)
+    at.run(timeout=30)
+
+    assert not at.exception
+    assert any("0x8889000a" in e.value for e in at.error)
