@@ -1,6 +1,6 @@
 # Multimodal Behavioural Analysis System — Project Report
 
-*Final report, Week 8. Companion to `Project_Synopsis.docx` (the original proposal —
+*Final report, Week 8 (updated after the post-session report, combined flags and question tracking were added). Companion to `Project_Synopsis.docx` (the original proposal —
 see its new Section 14 for a condensed version of this document) and `README.md`
 (the continuously-updated technical reference). This document is written to be read
 end-to-end by someone with no prior context — an evaluator, or you the night before
@@ -37,8 +37,9 @@ fairness scrutiny; this project sidesteps that entire problem class by scope.
      often do they blink.
    - **Audio**: a live transcript with word-level timestamps, from which pauses,
      speaking rate, and filler words are derived.
-   - **Text**: hedging language ("I guess", "maybe"), sentiment, and (not yet
-     live-wired — see §7) how relevant an answer is to the question asked.
+   - **Text**: hedging language ("I guess", "maybe"), sentiment, and how many of the
+     question's key words the answer touches (the interviewer types the question
+     wording when marking it).
 4. Every module writes its readings to one shared, timestamped **event log**
    (SQLite) — never to each other directly. This is the single most important
    architectural decision in the project (see §5).
@@ -48,7 +49,12 @@ fairness scrutiny; this project sidesteps that entire problem class by scope.
    0-100 scores — engagement, fluency, confidence — each traceable back to exactly
    which raw signals fed it.
 7. A **coaching-tip generator** turns those scores' underlying raw numbers into
-   worded, specific advice.
+   worded, specific advice — shown live, and again (on whole-window averages) in the
+   report.
+8. After the session, a **post-session report** (review page + downloadable HTML) gives
+   whole-session and per-question scores with their coverage, tips, answer transcripts,
+   every flagged moment, and the stretches where several signals were worse than the
+   speaker's own normal at the same time.
 
 ## 3. System architecture
 
@@ -63,10 +69,10 @@ FaceTime call on the interviewer's laptop
                      |
      Event log (SQLite): timestamped metrics + events + question markers
           |                                   |
-   Live dashboard (Streamlit,          Fusion + feedback
-   interviewer only)                   (rule-based scoring, then worded tips)
+   Live dashboard (Streamlit,          Fusion + feedback + combined flags
+   interviewer only)                   (rule-based scoring, worded tips, baseline flags)
           |                                   |
-          +------------- Post-session view ---+
+          +---- Post-session report (HTML) ---+
 ```
 
 **Why this shape, specifically:** each worker (video, audio) runs independently and
@@ -75,7 +81,7 @@ directly. That single decision is why a slow step (GPU transcription taking over
 second) can never freeze the live dashboard, and why adding the text module later
 required zero changes to the audio or video workers. It also made the project
 buildable module-by-module and testable module-by-module, which is a direct answer
-to "how did you keep 161 tests passing across 8 weeks of work."
+to "how did you keep 209 tests passing across 8 weeks of work."
 
 ## 4. Why rule-based scoring, not a trained model
 
@@ -129,7 +135,10 @@ any of the Week 1-5 code.
 | `app.py` | Streamlit live dashboard (interviewer-only) | Done, live-browser verified |
 | `analyzer/fusion.py` | Rule-based engagement/fluency/confidence scoring | Done, hand-verified |
 | `analyzer/feedback.py` | Turns scores into worded coaching tips | Done |
-| `analyzer/text.py` | Hedge rate, sentiment, answer relevance | Done, **not yet live-wired** (see §7) |
+| `analyzer/text.py` | Hedge rate, sentiment, answer relevance | Done; hedge/sentiment live-wired, relevance scored per question at session end |
+| `analyzer/questions.py` | Question markers (number + typed wording) and per-question splitting by timestamp | Done |
+| `analyzer/flags.py` | Flags where ≥2 signals are worse than the speaker's own median together | Done |
+| `analyzer/report.py`, `review_page.py` | Post-session report builder, HTML renderer, review page | Done, viewed in a browser on synthetic data |
 | `evaluation/` | Rater agreement, correlation, ablation tooling | Tooling done, **no real data yet** (see §8) |
 
 ### Video module
@@ -154,8 +163,12 @@ almost no real speech in it, because Whisper hallucinates short phrases ("You",
 `hedge_rate` reuses the same hedge-phrase lexicon audio_features.py already defined
 (one single definition of "what's a hedge phrase" project-wide). Sentiment is
 exact-token lexicon matching (so "strongly" doesn't false-match "strong"). Answer
-relevance is Jaccard word-overlap between question and answer text, after removing
-stopwords.
+relevance is the fraction of the question's key (non-stopword) words that also appear
+in the answer, with light suffix matching. An earlier Jaccard-overlap version was
+replaced: it shrank as the answer got longer (a 3-keyword question against a 150-word
+on-topic answer scored ~0.02), so it could not distinguish good answers from bad. It is
+keyword coverage only — an answer that merely repeats the question's words would score
+high — and it is not part of the fusion scores.
 
 ### Fusion layer
 Three sub-scores, each a weighted average of normalised (0-1) metric readings.
@@ -175,23 +188,54 @@ score that was computed from it, and returns 1-5 tips — worst signals first �
 honest "not enough data yet" / "everything's comfortable" placeholder instead of an
 empty list.
 
+### Questions and the report
+The interviewer can type the question wording next to "Mark next question". Words are
+assigned to questions **by their own timestamps when a session is read**, not by which
+question was current when a word was logged — transcription lags speech by several
+seconds, so write-time tagging would misfile a word spoken just before a marker.
+The report reuses `fusion.compute_scores` and `feedback.generate_tips` on the *average*
+of all readings in a window (whole session, or one question), so it cannot disagree with
+the live view's logic but is far steadier than a latest-reading snapshot. The exported HTML
+is self-contained (no scripts, no external requests) and escapes all typed text.
+
+### Combined flags
+A single long pause or glance away is normal; several signals worsening together is worth
+replaying. For each half-overlapping 30-second window, a signal "deviates" if it is at
+least 0.25 worse (in fusion's 0–1 space) than **this speaker's own session median** and
+is itself on the needs-work side (< 0.6); a long-pause event counts as one more signal.
+Two or more deviating signals flag the window, and overlapping flags merge into a span
+("01:00–01:30 — hedged phrasing and looking away from the camera together"). Choosing the
+speaker's own median rather than a universal ideal is the fairness argument from the
+synopsis (§9): gaze and pace vary with glasses, camera position and personal style. The
+trade-off is stated in the report: a session that is weak throughout deviates from nothing,
+so absolute coaching tips, not combined flags, cover that case.
+
 ## 7. Known gaps (say these before an evaluator finds them)
 
 - **Call-window capture via OBS Virtual Camera** is implemented but unexercised —
   OBS Studio isn't installed on the dev machine. The code path (`capture.py`'s
   `VideoSource` takes any camera index) needs no changes once it is; validated
   instead against a plain webcam.
-- **`analyzer/text.py`'s `TextWorker` isn't wired into the live pipeline.** It's
-  built and tested standalone; integrating it into `capture.py`/`app.py` the way
-  audio/video workers already are is left as next-step work.
-- **`answer_relevance` needs question text that nothing currently captures.** The
-  interviewer asks questions out loud; `app.py`'s "mark next question" button only
-  records a timestamp, not the question's wording. A text box for the interviewer
-  to type/paste the question is the missing piece.
-- **Background LLM-based tip phrasing** (mentioned as an option in the original
-  synopsis) was not built — tips are template-based against real computed numbers
-  instead, which satisfies "grounded only in real data" without an external-API
-  dependency added this late.
+- **The newest features haven't had a live-hardware run.** Question tracking, live text
+  signals, live tips, the report and combined flags are covered by fake-based tests, a
+  fake-session test of the live screen, an app test of the review page, and a browser
+  view of the report on synthetic data — but not re-run with a live mic and webcam. Earlier
+  bugs in this project only appeared on real hardware, so this is the first thing to do.
+- **Combined-flag and tip thresholds are starting values.** The 0.25 drop, 0.6 ceiling and
+  30 s window (and the `FUSION` reference ranges) have not been validated against human
+  ratings; the evaluation tooling exists to do that once ratings exist.
+- **The flag baseline is computed after the fact** from the whole-session median, not the
+  synopsis' live "calibrate early, then update slowly" baseline.
+- **Answer relevance is keyword coverage only**, and needs the interviewer to type the
+  question wording. It says nothing about answer quality or structure (STAR).
+- **No 50-minute soak test** has been run, and there is **no consent form** in the
+  repository yet.
+- **Not built, by decision:** background LLM-based tip phrasing (tips are template-based
+  against real computed numbers, which meets "grounded only in real data" without an
+  external API); separate worker *processes* and `run_session.py` (workers run as threads
+  with a queue between capture and transcription, which was verified against real
+  hardware); a Hugging Face sentiment model (lexicon instead); PDF export (the HTML prints
+  to PDF from any browser).
 
 Stating these upfront, with the reasoning, is a stronger answer in a viva than
 having an evaluator discover them and ask why.
@@ -219,7 +263,7 @@ by a specific test or a specific real-hardware run, not an assumption.
 
 ## 9. Testing philosophy
 
-161 automated tests, in two categories:
+209 automated tests, in two categories:
 
 - **Pure-logic tests** (the large majority) — no camera, microphone, or GPU needed.
   Pure functions tested with hand-calculated "golden value" expectations (not just
@@ -250,10 +294,11 @@ by a specific test or a specific real-hardware run, not an assumption.
 
 ## 11. What to say if asked "is this finished"
 
-No, and that's a more credible answer than "yes." Weeks 1-6 are complete and
-real-hardware verified. Week 7's *tooling* is complete and tested; its *data* is
-not collected, because that requires real interviews and real independent raters,
-which cannot be rushed. Week 8 (this report, the testing guide, and a rehearsed
-live demo) is the current work. Every claim in this report traces to a specific
-test file or a specific real-hardware run — see `README.md`'s "Current status" for
-the file-by-file breakdown.
+No, and that's a more credible answer than "yes." The software for the synopsis' Weeks
+1–6 is built and tested: live capture, the three analysis modules, fusion, tips, question
+tracking, the post-session report and combined flags. What remains is not code: a
+live-hardware pass over the newest features, the OBS call-window test, a 50-minute soak
+test, recording and independently rating real sessions (Week 7's actual point — the
+evaluation *tooling* is done, the *data* is not), the consent form, and demo rehearsal.
+Every "done" claim in this report traces to a specific test file or a specific
+real-hardware run — see `README.md`'s "Current status" for the file-by-file breakdown.

@@ -64,9 +64,9 @@ can never freeze the live dashboard.
 | Video analysis | OpenCV + MediaPipe Face Landmarker | Face/gaze/head-pose landmarks, runs on CPU |
 | Speech to text | faster-whisper, `small` model, GPU | Word-level timestamps, keeps up with live conversation |
 | Voice activity | Silero VAD | Real-time speaking/silence detection, CPU |
-| NLP | hedging lexicon + Hugging Face + LLM API (later) | Confidence language, sentiment, answer relevance |
+| NLP | hand-written word lists (hedges, sentiment, stopwords) — no Hugging Face model, no LLM | Confidence language, sentiment, answer relevance; transparent and needs no extra downloads (see `PROJECT_REPORT.md` §4) |
 | Fusion & stats | pandas, scikit-learn, SciPy | Rule-based scoring, correlation, agreement checks |
-| Dashboard | Streamlit + Plotly | Interviewer-only live view (not built yet) |
+| Dashboard | Streamlit | Interviewer-only live view + a post-session review page with HTML export |
 | Storage | SQLite (`analyzer/events.py`) | Shared by all workers + the dashboard |
 
 Full reasoning for each choice (including "why not FastAPI") is in the synopsis, Section 6.
@@ -87,12 +87,16 @@ minor_project/
     video_worker.py           DONE  live pipeline: calibration + camera-facing/pose/blink metrics
     capture.py                  DONE  live capture: webcam/loopback/mic wired into the workers
     dashboard_data.py             DONE  pure formatting/aggregation helpers for app.py
-    text.py                       DONE  hedging, sentiment, answer relevance (not live-wired yet)
+    text.py                       DONE  hedging, sentiment, answer relevance (live-wired via audio_worker/capture)
     fusion.py                     DONE  rule-based engagement/fluency/confidence scoring
-    feedback.py                   DONE  turns scores into coaching tips
-  app.py                            DONE  Streamlit live dashboard (interviewer-only)
-  run_session.py                   TODO  starts capture + worker processes
-  tests/                    DONE  pytest suite — 161 tests passing, run before every commit
+    feedback.py                   DONE  turns scores into coaching tips (live view + report)
+    questions.py                  DONE  question markers + per-question splitting by timestamp
+    flags.py                      DONE  "several signals worse together" flags vs the speaker's own baseline
+    report.py                     DONE  post-session report builder + self-contained HTML renderer
+  app.py                            DONE  Streamlit app: live view + sidebar switch to the review page
+  review_page.py                    DONE  post-session review page (imported by app.py)
+  (no run_session.py)               workers run as threads inside the Streamlit process — see "Design decisions"
+  tests/                    DONE  pytest suite — 209 tests passing, run before every commit
   evaluation/                DONE* tooling built + tested (statistics/ablation/validation);
                                     *no real data collected/evaluated yet — see evaluation/README.md
   data/sessions/               each recorded/analysed session gets its own subfolder + events.db
@@ -204,17 +208,48 @@ minor_project/
   `audio_features.count_hedges`, so there's one single definition of "what's a hedge
   phrase" project-wide), lexicon-based `sentiment_score` (exact-token match against
   `TEXT.positive_words`/`negative_words`, not substring — "strongly" doesn't match
-  "strong"), and `answer_relevance` (Jaccard overlap of non-stopword tokens between a
-  question and an answer). `TextWorker` writes `hedge_rate`/`sentiment`/`answer_relevance`
-  to the event log the same way `AudioWorker`/`VideoWorker` do. `hedge_rate` now actually
-  feeds `fusion.py`'s confidence score — no changes needed there, the weight was already
-  configured and just waiting for something to produce the metric. 24 tests in
-  `tests/test_text.py`.
-  **Known gap:** `answer_relevance` is tested and ready but nothing wires it into a live
-  session yet — it needs the literal question text, and nothing currently captures that
-  (the interviewer asks out loud; `app.py`'s "mark next question" button only marks a
-  timestamp). Needs a UI decision (e.g. a question-text box in `app.py`) before it can run
-  live — see `analyzer/text.py`'s module docstring.
+  "strong"), and `answer_relevance` (the share of the question's non-stopword keywords
+  that also appear in the answer, with light suffix stripping so "database" matches
+  "databases"). An earlier Jaccard version was replaced because it shrank as the answer got
+  longer -- a 3-keyword question against a 150-word on-topic answer scored ~0.02 -- so it
+  couldn't tell good answers from bad; coverage of the question doesn't have that problem
+  (regression-tested). Its honest limit: it is keyword coverage only, not answer quality.
+  `TextWorker` writes `hedge_rate`/`sentiment` on every transcribed segment (called from
+  `AudioWorker`) and `answer_relevance` once per question at the end of a session. `hedge_rate`
+  feeds `fusion.py`'s confidence score -- no changes were needed there, the weight was
+  already configured. 29 tests in `tests/test_text.py`.
+- **Questions** (`analyzer/questions.py`) -- the interviewer can type the question wording
+  next to "Mark next question"; the marker stores its number and text. Words are assigned to
+  a question **by their own timestamps at read time**, never by "whichever question was
+  current when the word was logged": transcription lags speech by several seconds, so
+  write-time tagging would put a word spoken just before a marker into the wrong question
+  (regression-tested). A question with no typed wording or no answer gets no relevance
+  score -- never a fabricated 0.
+- **Live coaching tips** -- `app.py` shows `feedback.py`'s tips under the scores. They use
+  only the latest reading, so they can flip during a session; the report's tips use
+  whole-window averages and are the ones to rely on.
+- **Post-session report** (`analyzer/report.py`, `review_page.py`) -- the sidebar **Mode ->
+  Review saved session** opens any folder under `data/sessions/`: whole-session and
+  per-question scores (each with its coverage), raw averages, sentiment, answer relevance,
+  coaching tips, answer transcripts, and the flagged-moments timeline. It reuses
+  `fusion.compute_scores` / `feedback.generate_tips` on window *averages* (not the latest
+  reading), so it can't disagree with the live view's logic. The page shows exactly the HTML
+  that the **Download report (HTML)** button exports -- self-contained (inline CSS, no
+  scripts or external requests), all typed text HTML-escaped, and it prints to PDF from any
+  browser. The footer states the caveats (proxies, unvalidated ranges, low coverage).
+  Simplifications, also in the footer: averages are plain means of interval readings, and
+  audio readings are stamped when a transcribed chunk ends, so an answer's first seconds
+  can be counted toward the previous question.
+- **Combined flags** (`analyzer/flags.py`, `FlagConfig` in `config.py`) -- flags stretches
+  where **at least two signals were clearly worse than this speaker's own session median at
+  the same time** (a long pause + hedged phrasing + looking away...). Works in `fusion.py`'s
+  0-1 "how good" space via the public `normalise_metric()`, over half-overlapping 30 s
+  windows, merged into spans. A signal with fewer than 3 readings has no baseline and can't
+  fire. Limits: the baseline is the whole-session median computed after the fact (not the
+  synopsis' live "calibrate then slowly update"); a uniformly weak session deviates from
+  nothing, so it shows few combined flags (the absolute tips cover that); blink rate is
+  excluded as a weak signal. Thresholds are starting values, not validated. 15 tests,
+  including a mutation check (`min_signals=1` breaks 5 of them).
 - **Evaluation tooling** (`evaluation/`, Week 7) — `statistics.py` (Pearson, Spearman,
   Cohen's kappa — each returns `None`, never a fabricated 0.0/1.0, when the input can't
   support the statistic), `ablation.py` (leave-one-signal-out impact per metric, reusing
@@ -226,21 +261,31 @@ minor_project/
   getting them rated by real people — the tooling is ready, the data collection (Week 7's
   actual point) has not happened. See `evaluation/README.md` for the full methodology,
   current status, and how to run it once ratings exist.
-- 161/161 tests passing (up from 95 — see above).
+- 209/209 tests passing (up from 95 — see above). Includes a fake-session `AppTest` of the
+  live view and an `AppTest` of the review page, so both screens are exercised without hardware.
 
-### Not started yet
+### Not done yet
 - **Call-window video capture via OBS Virtual Camera.** `capture.py`'s `VideoSource`
   works with any camera device index, so once OBS is installed its virtual camera can
-  be used as-is — nothing in the code needs to change, just point `camera_index` at it
+  be used as-is -- nothing in the code needs to change, just point `camera_index` at it
   (see `analyzer/capture.py`'s docstring). **Blocked: OBS Studio is not installed on
-  the dev machine yet.** Until it is, `capture.py`/`app.py` have been developed and
-  validated against a plain webcam instead. **This is the natural next task.**
-- Wiring `analyzer/text.py`'s `TextWorker` into the live pipeline (`capture.py`/`app.py`)
-  the way `AudioWorker`/`VideoWorker` already are, and a question-text input for
-  `answer_relevance` (see "Known gap" above).
-- Real dataset collection + running `evaluation/`'s tooling against it, and
-  validating/recalibrating `fusion.py`'s reference ranges if the data supports it — the
-  actual data-collection part of Week 7 (the tooling itself is built — see above).
+  the dev machine yet.** Until it is, everything has been developed and validated against
+  a plain webcam. Compressed call video is expected to lower gaze accuracy (synopsis 5.2);
+  measuring that is part of this task.
+- **A real-hardware pass over the newest features.** Questions, live text signals, tips, the
+  report and combined flags are covered by fake-based tests and a fake-session `AppTest`, and
+  the report was viewed in a browser on synthetic data -- but none of it has been re-run with
+  a live mic + webcam yet. Earlier bugs in this project only showed up on real hardware, so
+  do this before trusting it (steps in `TESTING_GUIDE.md`).
+- **50-minute soak test** (CPU/GPU/memory/transcript delay logged over a full session).
+- **Real dataset collection** + running `evaluation/`'s tooling against it, then
+  validating/recalibrating `fusion.py`'s ranges and `FlagConfig`'s thresholds if the data
+  supports it -- the actual data-collection part of Week 7.
+- **Consent form** (synopsis 9) -- not in the repo.
+- **Not built, by decision:** background LLM scoring/tip phrasing (tips are template-based
+  against real numbers instead); `run_session.py` and separate worker *processes* (workers
+  run as threads inside the Streamlit process, decoupled by a queue -- see "Design
+  decisions"); Hugging Face sentiment (lexicon instead); PDF export (HTML prints to PDF).
 
 ### Known gotchas (read before touching audio/GPU code)
 - **A score built from half its inputs must never look like a complete one — always
@@ -392,7 +437,7 @@ Run the tests to confirm the setup works:
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q
 ```
-You should see `161 passed`. If GPU-related tests are added later and fail, that's a
+You should see `209 passed`. If GPU-related tests are added later and fail, that's a
 hardware/driver issue on your machine specifically — CPU fallback should still work
 (`analyzer/transcribe.py` falls back automatically and logs a warning). None of the
 current tests actually require a GPU, webcam or microphone — they use fake
@@ -412,17 +457,14 @@ To actually see the live dashboard (needs a webcam and speakers/mic on your mach
 | 3 | Video worker: gaze, head pose, blinks, calibration | **Done** (`analyzer/video_worker.py`, tested against a real webcam) |
 | 4 | Event log + live Streamlit dashboard | **Done** (`analyzer/events.py`, `analyzer/capture.py`, `app.py` — all tested against real hardware) |
 | 5 | Fusion layer: rule-based scoring | **Done** (`analyzer/fusion.py`, wired live into `app.py`, verified against hand-calculated values) |
-| 6 | Feedback generator + text signals (hedging/sentiment/relevance) | **Done** (`analyzer/feedback.py`, `analyzer/text.py` — see "Current status"). Background LLM scoring not started; not required, tips are template-based. `text.py` not yet wired into the live pipeline (see its "Known gap"). |
+| 6 | Feedback generator + text signals + post-session report | **Done** (`feedback.py`, `text.py`, `questions.py`, `flags.py`, `report.py`, `review_page.py`). Text signals and tips are live-wired; the report is built. Background LLM scoring not built (not required -- tips are template-based). |
 | 7 | Data collection + evaluation (validation, rater agreement, ablation) | **Tooling done** (`evaluation/`). **Real data collection not started** — see `evaluation/README.md`. |
-| 8 | Polish, demo rehearsal, final report | Not started |
+| 8 | Polish, demo rehearsal, final report | **In progress** -- report/testing guide/docs done; the live-hardware pass, OBS test, soak test and demo rehearsal are still to do |
 
-**We're ahead of the week-by-week schedule** — Weeks 2 through 6 are done, and Week 7's
-tooling is done (its actual data-collection step is the next real bottleneck, not code).
-The remaining open item from Week 1, call-window video capture, is blocked on installing
-OBS Studio, not on anything technical. Next natural tasks: wire `analyzer/text.py`'s
-`TextWorker` into the live pipeline the way audio/video workers already are, collect a
-handful of real rated sessions and run `evaluation/`'s tooling against them, or start
-Week 8 polish/demo prep.
+**Status in one line:** all the software in the synopsis' Weeks 1-6 exists and is tested
+(209 tests). What is genuinely left is not code: a live-hardware pass over the newest
+features, the OBS call-window test, a 50-minute soak test, collecting and rating real
+sessions (Week 7's point), the consent form, and demo rehearsal.
 
 If behind schedule: drop background LLM scoring first (already not needed — tips are
 template-based), then the live transcript (keep live video + voice-activity metrics;
@@ -448,34 +490,39 @@ transcribe after the session instead).
 
 ---
 
+## Design decisions worth knowing
+
+- **Threads, not processes.** The synopsis proposed separate worker processes and a
+  `run_session.py`. In practice `SessionCapture` runs video, candidate-audio and
+  interviewer-audio as threads, with a `QueuedConsumer` so slow GPU transcription can never
+  block audio capture (see "Known gotchas"). It's simpler and was verified against real
+  hardware; the event-log seam means switching to processes later wouldn't change the
+  workers.
+- **Rule-based everywhere** (scores, tips, sentiment, relevance, combined flags): the data
+  we can collect is too small to train anything defensibly, and a number you can trace to
+  named inputs is easier to act on and to defend. Anything that would be a guess is `None`
+  and shown as "no data", never a default.
+- **Relative-to-self for flags, absolute for tips.** Combined flags compare a person to
+  their own session median (fairness: gaze/pace vary by glasses, camera, style); coaching
+  tips use fixed reference ranges.
+
+---
+
 ## For a new contributor / new Claude session
 
 If you're starting a fresh Claude Code session on this repo with no prior context,
 paste this to Claude:
 
-> Read `README.md` in full, then read `analyzer/config.py`, `analyzer/events.py`,
-> `analyzer/audio_features.py`, `analyzer/transcribe.py`, `analyzer/vad.py`,
-> `analyzer/audio_worker.py`, `analyzer/video_features.py`, `analyzer/video.py`,
-> `analyzer/video_worker.py`, `analyzer/capture.py`, `analyzer/dashboard_data.py`,
-> `analyzer/fusion.py` and `app.py` to see what's already built and tested — pay
-> particular attention to the "Known gotchas" section, which explains several real
-> bugs (dropped words from a bad chunking design, dropped words again from a
-> threading bug, Whisper hallucinating on silence, a frozen UI element) that were
-> found by testing against real hardware and fixed, and to `fusion.py`'s docstring,
-> which explains the two rules its scoring enforces (never fabricate a missing
-> metric; a sub-score with no inputs is `None`, not a fake default). Then run:
->   `mkdir -p analyzer/models && curl -L -o analyzer/models/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`
+> Read `README.md` in full (especially "Known gotchas" and "Design decisions"), then
+> `PROJECT_REPORT.md` and `analyzer/config.py`. Then read `analyzer/events.py`,
+> `analyzer/audio_worker.py`, `analyzer/capture.py`, `analyzer/fusion.py`,
+> `analyzer/feedback.py`, `analyzer/questions.py`, `analyzer/flags.py`,
+> `analyzer/report.py`, `app.py` and `review_page.py`. Run
+> `mkdir -p analyzer/models && curl -L -o analyzer/models/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`
 > (the face-tracking model isn't committed to git) and
-> `./.venv/Scripts/python.exe -m pytest tests/ -q` to confirm the setup works (expect
-> 95 passed — none of these need a camera, mic or GPU, they all use fakes). If you want
-> to see the actual dashboard, including the live fusion scores, `./.venv/Scripts/streamlit.exe run app.py`
-> needs a real webcam and speakers/mic. Then help me build `analyzer/feedback.py`
-> (Week 6): turn a `FusionResult` (see `analyzer/fusion.py`) into three to five
-> specific, worded coaching tips grounded only in the actual computed numbers and
-> timestamps (e.g. "Camera-facing time was 42% — try holding your gaze on the lens for
-> 3-5 seconds at a time"), never inventing an observation the data doesn't support. If
-> a language model is used to phrase the tips, it must only see the already-computed
-> metrics as input, never raw video/audio — the scores themselves stay rule-based, per
-> the synopsis Sec 5.7. Alongside that, `analyzer/text.py` (hedging/sentiment/answer
-> relevance) is the other open Week 6 item, and it plugs straight into `fusion.py`'s
-> confidence score with no changes needed there once it writes a `hedge_rate` metric.
+> `./.venv/Scripts/python.exe -m pytest tests/ -q` (expect 209 passed -- none need a
+> camera, mic or GPU). Two rules run through the whole codebase: never fabricate a
+> missing metric (it's `None`, shown as "no data"), and always show a score's coverage
+> next to its number. The remaining work is listed under "Not done yet" -- the
+> most valuable next steps are the live-hardware pass over the newest features, the OBS
+> call-window test, and collecting real rated sessions to run `evaluation/` on.

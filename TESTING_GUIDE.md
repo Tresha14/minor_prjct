@@ -12,7 +12,7 @@ Step 4 onward is the actual hands-on test with your webcam/mic.
 ## 1. Confirm the environment
 
 ```bash
-cd C:/minor_prjct
+cd <path to your minor_project folder>
 ./.venv/Scripts/python.exe --version
 ```
 Expect: `Python 3.11.9`. If this errors, the venv isn't set up —
@@ -35,7 +35,7 @@ curl -L -o analyzer/models/face_landmarker.task \
 ```bash
 ./.venv/Scripts/python.exe -m pytest tests/ -q
 ```
-**Expect: `161 passed`**, no failures, finishing in well under a minute. This
+**Expect: `209 passed`**, no failures, finishing in well under a minute. This
 doesn't touch your camera or mic — it's every pure-logic test plus a Streamlit
 smoke test in its idle state. If anything fails here, fix it before moving on —
 everything after this point assumes this is green.
@@ -79,6 +79,7 @@ whichever channel you configured). Within a few seconds you should see:
 - **Live transcript** updating with the words you said
 - **WPM** (words per minute) showing a plausible number (~110-165 is "comfortable")
 - **Pause rate** and **filler rate** tiles updating
+- **Hedges / 100 words** tile updating (say a few "maybe" / "I guess" phrases to push it up)
 - **Camera-facing %** updating as you look at/away from the lens
 - Charts scrolling forward in real time
 
@@ -106,11 +107,21 @@ After you've spoken enough for at least a few metrics to populate, look for the
 - an expander ("How these scores were built" or similar) showing exactly which
   metrics fed the score and their individual contributions
 
-## 8. Mark a question and check timing
+## 7b. Check the live coaching tips
 
-Click the "mark next question" control partway through. Expect a
-"New question marked" entry to show up in the session's event timeline at
-roughly the right timestamp.
+Under the scores there is a **Coaching tips (live)** section. Expect 🔸 tips for weak
+readings (e.g. look away from the camera for a while → a camera-facing tip), ✅ for good
+ones, or an ℹ️ line if there isn't enough data yet. These use only the latest reading, so
+they can flip while you talk — that's expected; the report is the steadier view.
+
+## 8. Mark questions (with wording) and check timing
+
+Type a question into the box next to **Mark next question** (e.g. "Describe your
+experience with databases"), then click **Mark next question**. Expect a toast
+"Marked question 1 at MM:SS", the box to clear, and an entry like
+`New question marked (Q1: Describe your experience with databases)` in the events list.
+Answer out loud, mark a second question the same way, and answer again. Marking one
+*without* typing wording is fine too — it just won't get a relevance score.
 
 ## 9. Stop the session
 
@@ -126,6 +137,22 @@ ls data/sessions/
 ```
 Pick the newest folder and confirm `events.db` exists and has non-trivial size
 (not 0 bytes).
+
+## 9b. Open the post-session report
+
+In the sidebar switch **Mode → Review saved session**. Pick the session you just ran
+(the newest is preselected). Expect:
+- Whole-session Engagement / Fluency / Confidence, each with "built from X% of usual
+  signals" (Confidence should now include the hedge signal if you spoke).
+- One section per question: your typed wording, its scores, the raw averages, answer
+  relevance (% of the question's key words your answer touched), tips, the flags that
+  happened during it, and your answer's transcript **under the right question** — words
+  spoken just before you pressed Mark should still be in the previous question.
+- "Best moments to replay" — may legitimately say "No stretch had several signals worse
+  than usual at once" for a short or steady session. To see one, deliberately look away
+  from the camera *and* go quiet/hedge for ~30 s in the middle of a longer run.
+- **Download report (HTML)** gives a file that opens on its own in any browser (no
+  internet needed); Print → Save as PDF works.
 
 ## 10. Sanity-check a saved session's data directly (optional but reassuring)
 
@@ -151,17 +178,20 @@ non-zero counts if you spoke during the session.
 - **Near-constant "looking away" for the whole session** — almost always means
   calibration happened while you weren't looking at the camera (step 5), not a
   scoring bug. Restart the session and actually look at the lens for the first 8s.
-- **`analyzer/text.py`'s hedge/sentiment/relevance metrics never appearing on the
-  live dashboard** — expected; `TextWorker` isn't wired into the live pipeline yet
-  (see `PROJECT_REPORT.md` §7). The module itself is tested and working in isolation
-  (`./.venv/Scripts/python.exe -m pytest tests/test_text.py -q`), just not plugged
-  into `app.py` yet.
+- **No combined flags in a short or steady session** — correct. They only appear when
+  at least two signals are clearly worse than *your own* typical level in the same 30 s.
+  A session that is uniformly weak also shows few, by design (the tips cover that).
+- **Answer relevance shown as "not scored"** — it needs typed question wording and at
+  least one transcribed answer word for that question.
+- **Live tips changing from moment to moment** — they use only the latest reading; the
+  report averages the whole window.
 
 ## 12. If something goes wrong
 
 | Symptom | Likely cause |
 |---|---|
 | `FileNotFoundError` mentioning `face_landmarker.task` | Step 2 wasn't done — download the model. |
+| Report page says "No saved sessions found" | Nothing has been saved under `data/sessions/` yet — run and Stop a session first. |
 | GPU transcription errors / falls back to CPU with a warning | Expected on a machine without the exact CUDA setup this was tuned for (see README "Known gotchas" — needs `nvidia-cublas-cu12`/`nvidia-cudnn-cu12` via pip, not a full CUDA toolkit install). CPU fallback still works, just slower. |
 | No camera-facing data at all | Check another app isn't already holding the webcam; check the correct camera index is configured. |
 | Streamlit page never loads | Check the terminal for a Python traceback; check nothing else is already using port 8501. |
