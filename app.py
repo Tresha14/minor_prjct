@@ -37,11 +37,22 @@ import streamlit as st
 from analyzer.capture import SessionCapture
 from analyzer.config import PATHS
 from analyzer.dashboard_data import (
-    FLAGGED_EVENT_KINDS, format_seconds, latest_value, metric_delta_label, summarize_events,
+    FLAGGED_EVENT_KINDS, format_seconds, format_tip, latest_value, metric_delta_label, summarize_events,
 )
+from analyzer.feedback import generate_tips_from_log
 from analyzer.fusion import compute_from_log, write_scores
+from analyzer.questions import mark_question as write_question_marker
 
 st.set_page_config(page_title="Interview Coach — Live View", layout="wide")
+
+# Two modes in one app: the live interviewer view (below) and a review page
+# for saved sessions. The review branch stops the script so none of the live
+# machinery (session state, camera, model) is touched while reviewing.
+page_mode = st.sidebar.radio("Mode", ["Live session", "Review saved session"], key="page_mode")
+if page_mode == "Review saved session":
+    import review_page
+    review_page.render()
+    st.stop()
 
 
 @st.cache_resource(show_spinner="Loading the speech model (first run downloads a few hundred MB)...")
@@ -72,6 +83,7 @@ def stop_session() -> None:
     tracker = st.session_state.get("face_tracker")
     if tracker is not None:
         tracker.close()
+    st.session_state.last_session_dir = st.session_state.get("session_dir")
     st.session_state.session = None
     st.session_state.face_tracker = None
 
@@ -81,8 +93,10 @@ def mark_question() -> None:
     if session is None or session._t0 is None:
         return
     elapsed = time.time() - session._t0
-    session.log.event("session", "question_marker", t_start=elapsed)
-    st.toast(f"Marked a new question at {format_seconds(elapsed)}")
+    text = st.session_state.get("question_text", "")
+    n = write_question_marker(session.log, text, elapsed)
+    st.session_state.question_text = ""  # ready for the next question
+    st.toast(f"Marked question {n} at {format_seconds(elapsed)}")
 
 
 if "session" not in st.session_state:
@@ -102,12 +116,22 @@ with control_cols[0]:
         st.button("■ Stop session", on_click=stop_session)
 with control_cols[1]:
     st.button("Mark next question", on_click=mark_question, disabled=session is None)
+with control_cols[2]:
+    st.text_input(
+        "Question wording (optional)", key="question_text", disabled=session is None,
+        label_visibility="collapsed",
+        placeholder="Type or paste the question you're asking, then press Mark next question "
+                    "(enables the answer-relevance score)",
+    )
 
 if session is None:
     st.info(
         "Press **Start session** to begin capturing from the webcam and system audio. "
         "The first start will take a few seconds while the speech model loads."
     )
+    if st.session_state.get("last_session_dir"):
+        st.success("Last session saved. Switch **Mode → Review saved session** in the sidebar "
+                   "to see its report.")
     st.checkbox(
         "🧪 Solo test mode — transcribe my own microphone as if I were the candidate",
         key="solo_test_mode",
@@ -160,8 +184,9 @@ else:
         pause_rate = log.recent_metrics("pause_rate")
         filler_rate = log.recent_metrics("filler_rate")
 
+        hedge_rate = log.recent_metrics("hedge_rate")
         st.subheader("Live indicators")
-        metric_cols = st.columns(5)
+        metric_cols = st.columns(6)
         cf = latest_value(camera_facing)
         metric_cols[0].metric("Camera-facing", f"{cf * 100:.0f}%" if cf is not None else "—",
                                delta=metric_delta_label(camera_facing))
@@ -177,6 +202,9 @@ else:
         br = latest_value(blink_rate)
         metric_cols[4].metric("Blinks / min", f"{br:.0f}" if br is not None else "—",
                                delta=metric_delta_label(blink_rate))
+        hr = latest_value(hedge_rate)
+        metric_cols[5].metric("Hedges / 100 words", f"{hr:.1f}" if hr is not None else "—",
+                               delta=metric_delta_label(hedge_rate))
 
         # Silence on the candidate channel for a while is normal at the very
         # start (calibration, no one's spoken yet) but confusing later on --
@@ -240,6 +268,14 @@ else:
                     st.text(f"{label}: {parts}")
                 else:
                     st.text(f"{label}: not enough data yet")
+
+        # Tips are built from the same latest readings as the tiles above
+        # (feedback.py reuses fusion.py's thresholds), so they move as the
+        # readings move. Treat them as a live nudge for the interviewer, not
+        # a verdict -- the post-session report summarises the whole session.
+        st.subheader("Coaching tips (live)")
+        for tip in generate_tips_from_log(log):
+            st.markdown(format_tip(tip))
 
         chart_cols = st.columns(2)
         with chart_cols[0]:
