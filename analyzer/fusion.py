@@ -144,6 +144,16 @@ def _normalised(inputs: FusionInputs) -> dict[str, float | None]:
     }
 
 
+def normalise_metric(name: str, value: float) -> float:
+    """One raw reading -> its 0-1 "how good is this" score, using exactly
+    the transform the fusion scores use. Public so other layers (e.g.
+    analyzer/flags.py) compare readings in the same units instead of
+    re-deriving thresholds."""
+    if name not in NORMALISABLE_METRICS:
+        raise ValueError(f"unknown metric {name!r}; expected one of {sorted(NORMALISABLE_METRICS)}")
+    return _normalised(FusionInputs(**{name: value}))[name]
+
+
 def weighted_average(weighted_scores: dict[str, tuple[float, float | None]]) -> tuple[float | None, dict[str, float]]:
     """`weighted_scores`: {metric_name: (weight, normalised_score_or_None)}.
 

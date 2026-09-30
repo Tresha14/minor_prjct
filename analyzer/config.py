@@ -193,9 +193,24 @@ class FeedbackConfig:
     max_tips: int = 5              # cap on how many tips generate_tips() returns at once
 
 
+@dataclass(frozen=True)
+class FlagConfig:
+    """Thresholds for "several signals deviated together" flags
+    (analyzer/flags.py). All comparisons are made in fusion.py's 0-1 "how
+    good is this" space, so they line up with the scores by construction.
+    """
+    window_s: float = 30.0             # length of the window checked for co-occurring deviations
+    step_s: float = 15.0               # windows overlap by half; overlapping flagged windows are merged
+    norm_drop: float = 0.25            # a signal "deviates" when the window is at least this much worse than the speaker's OWN session median...
+    norm_max: float = 0.60             # ...AND is itself on the needs-work side (so a consistently great speaker isn't flagged for noise)
+    min_signals: int = 2               # this many deviating signals in one window -> flagged
+    min_baseline_readings: int = 3     # need at least this many readings to trust a session median; otherwise that signal can't fire
+
+
 AUDIO = AudioConfig()
 VIDEO = VideoConfig()
 TEXT = TextConfig()
 PATHS = Paths()
 FUSION = FusionConfig()
 FEEDBACK = FeedbackConfig()
+FLAGS = FlagConfig()
